@@ -179,13 +179,15 @@ def _extract_notification_tags(tags, keys):
 
 
 def _build_change(action, resource_type, resource_id, tags, notify_tag_keys, details=None):
-    return {
+    change = {
         "action": action,
         "resource_type": resource_type,
         "resource_id": resource_id,
-        "details": details,
         "tag_summary": _extract_notification_tags(tags, notify_tag_keys),
     }
+    if details:
+        change["details"] = details
+    return change
 
 
 def _evaluate_schedule(tags, config, now_minutes, now_token):
@@ -306,12 +308,13 @@ def _render_table(headers, rows):
             _pad_cell(values[idx], widths[idx]) for idx in range(len(values))
         ) + " |"
 
-    lines = [
-        _line(headers),
-        "| " + " | ".join("-" * widths[idx] for idx in range(len(headers))) + " |",
-    ]
+    def _border():
+        return "+-" + "-+-".join("-" * widths[idx] for idx in range(len(headers))) + "-+"
+
+    lines = [_border(), _line(headers), _border()]
     for row in rows:
         lines.append(_line(row))
+    lines.append(_border())
     return lines
 
 

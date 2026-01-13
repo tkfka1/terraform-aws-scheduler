@@ -1,0 +1,46 @@
+name: Bump Version Tag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  bump-tag:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create next tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest_tag=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" --sort=-v:refname | head -n1)
+          if [ -z "$latest_tag" ]; then
+            new_tag="v1.0.0"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "$version"
+            if [ -z "${major:-}" ] || [ -z "${minor:-}" ] || [ -z "${patch:-}" ]; then
+              echo "Latest tag '$latest_tag' is not semver; aborting."
+              exit 1
+            fi
+            patch=$((patch + 1))
+            new_tag="v${major}.${minor}.${patch}"
+          fi
+
+          if git rev-parse "$new_tag" >/dev/null 2>&1; then
+            echo "Tag $new_tag already exists; skipping."
+            exit 0
+          fi
+
+          echo "Creating tag $new_tag"
+          git tag -a "$new_tag" -m "Release $new_tag"
+          git push origin "$new_tag"

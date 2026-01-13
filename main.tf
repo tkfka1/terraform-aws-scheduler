@@ -1,0 +1,128 @@
+locals {
+  assume_role_arns = [
+    for account in var.accounts : (
+      startswith(account.iam_role, "arn:")
+      ? account.iam_role
+      : "arn:aws:iam::${account.account_id}:role/${account.iam_role}"
+    )
+  ]
+}
+
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda"
+  output_path = "${path.module}/scheduler-lambda.zip"
+}
+
+resource "aws_iam_role" "lambda" {
+  name               = var.lambda_role_name
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+  tags               = var.tags
+}
+
+data "aws_iam_policy_document" "lambda_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "lambda" {
+  name   = "${var.lambda_role_name}-policy"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.lambda_policy.json
+}
+
+data "aws_iam_policy_document" "lambda_policy" {
+  statement {
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["arn:aws:logs:*:*:*"]
+  }
+
+  statement {
+    actions   = ["sts:AssumeRole"]
+    resources = local.assume_role_arns
+  }
+
+  dynamic "statement" {
+    for_each = var.enable_rds ? [1] : []
+    content {
+      actions = [
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBClusters",
+        "rds:ListTagsForResource",
+        "rds:StartDBInstance",
+        "rds:StopDBInstance",
+        "rds:StartDBCluster",
+        "rds:StopDBCluster",
+      ]
+      resources = ["*"]
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "lambda" {
+  name              = "/aws/lambda/${var.lambda_function_name}"
+  retention_in_days = var.log_retention_in_days
+  tags              = var.tags
+}
+
+resource "aws_lambda_function" "scheduler" {
+  function_name = var.lambda_function_name
+  role          = aws_iam_role.lambda.arn
+  handler       = "lambda_function.handler"
+  runtime       = "python3.11"
+  filename      = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  memory_size = var.lambda_memory_size
+  timeout     = var.lambda_timeout_seconds
+
+  environment {
+    variables = {
+      ACCOUNTS_JSON      = jsonencode(var.accounts)
+      TIMEZONE           = var.timezone
+      ENABLE_EC2         = tostring(var.enable_ec2)
+      ENABLE_RDS         = tostring(var.enable_rds)
+      ENABLE_ASG         = tostring(var.enable_asg)
+      TAG_SCHEDULE_KEY   = var.tag_schedule_key
+      TAG_SCHEDULE_VALUE = var.tag_schedule_value
+      TAG_START_KEY      = var.tag_start_key
+      TAG_STOP_KEY       = var.tag_stop_key
+      TAG_WEEKDAY_KEY    = var.tag_weekday_key
+      TAG_ASG_MIN_KEY    = var.tag_asg_min_key
+      TAG_ASG_MAX_KEY    = var.tag_asg_max_key
+      TAG_ASG_DESIRED_KEY = var.tag_asg_desired_key
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_event_rule" "hourly" {
+  name                = var.event_rule_name
+  schedule_expression = var.schedule_expression
+  tags                = var.tags
+}
+
+resource "aws_cloudwatch_event_target" "lambda" {
+  rule      = aws_cloudwatch_event_rule.hourly.name
+  target_id = "scheduler"
+  arn       = aws_lambda_function.scheduler.arn
+}
+
+resource "aws_lambda_permission" "events" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.scheduler.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.hourly.arn
+}

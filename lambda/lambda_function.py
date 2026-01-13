@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime
 
@@ -8,6 +9,10 @@ try:
     from zoneinfo import ZoneInfo
 except Exception:  # pragma: no cover - best effort fallback
     ZoneInfo = None
+
+logger = logging.getLogger()
+if not logger.handlers:
+    logging.basicConfig()
 
 
 def _load_accounts():
@@ -61,6 +66,13 @@ def _load_settings():
             "Schedule_Asg_Desired",
         ),
     }
+
+
+def _configure_logging():
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    return level_name
 
 
 def _parse_int(value):
@@ -427,6 +439,7 @@ def handler(event, context):
         raise RuntimeError("ZoneInfo not available")
 
     settings = _load_settings()
+    log_level = _configure_logging()
 
     try:
         tz = ZoneInfo(settings["timezone"])
@@ -436,6 +449,13 @@ def handler(event, context):
     now = datetime.now(tz=tz)
     now_minutes = now.hour * 60 + now.minute
     now_token = _weekday_token(now)
+
+    logger.info(
+        "scheduler start log_level=%s timezone=%s now=%s",
+        log_level,
+        settings["timezone"],
+        now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+    )
 
     accounts = _load_accounts()
     base_session = boto3.Session()
@@ -472,28 +492,43 @@ def handler(event, context):
             else None
         )
 
+        ec2_scanned = 0
+        ec2_changes = 0
         if settings["enable_ec2"] and ec2:
             for instance in _collect_instances(
                 ec2,
                 tag_config["schedule_key"],
                 tag_config["schedule_value"],
             ):
+                ec2_scanned += 1
                 change = _handle_instance(ec2, instance, tag_config, now_minutes, now_token)
                 if change:
+                    ec2_changes += 1
                     changes.append(change)
 
+        rds_instance_scanned = 0
+        rds_instance_changes = 0
+        rds_cluster_scanned = 0
+        rds_cluster_changes = 0
         if settings["enable_rds"] and rds:
             for instance in _collect_rds_instances(rds):
+                rds_instance_scanned += 1
                 change = _handle_rds_instance(rds, instance, tag_config, now_minutes, now_token)
                 if change:
+                    rds_instance_changes += 1
                     changes.append(change)
             for cluster in _collect_rds_clusters(rds):
+                rds_cluster_scanned += 1
                 change = _handle_rds_cluster(rds, cluster, tag_config, now_minutes, now_token)
                 if change:
+                    rds_cluster_changes += 1
                     changes.append(change)
 
+        asg_scanned = 0
+        asg_changes = 0
         if settings["enable_asg"] and asg:
             for group in _collect_autoscaling_groups(asg):
+                asg_scanned += 1
                 change = _handle_autoscaling_group(
                     asg,
                     group,
@@ -503,7 +538,30 @@ def handler(event, context):
                     now_token,
                 )
                 if change:
+                    asg_changes += 1
                     changes.append(change)
+
+        logger.info(
+            "account=%s region=%s ec2_scanned=%d ec2_changes=%d "
+            "rds_instances_scanned=%d rds_instances_changes=%d "
+            "rds_clusters_scanned=%d rds_clusters_changes=%d "
+            "asg_scanned=%d asg_changes=%d",
+            account.get("account_id"),
+            account.get("region"),
+            ec2_scanned,
+            ec2_changes,
+            rds_instance_scanned,
+            rds_instance_changes,
+            rds_cluster_scanned,
+            rds_cluster_changes,
+            asg_scanned,
+            asg_changes,
+        )
+
+        if changes:
+            logger.info("account=%s changes=%s", account.get("account_id"), changes)
+        else:
+            logger.info("account=%s no changes", account.get("account_id"))
 
         _maybe_send_notifications(account, changes, now)
         summary.append({"account": account.get("account_id"), "changes": changes})

@@ -6,6 +6,7 @@ locals {
       : "arn:aws:iam::${account.account_id}:role/${account.iam_role}"
     )
   ]
+  eventbridge_log_group_name = trimspace(var.eventbridge_log_group_name) != "" ? trimspace(var.eventbridge_log_group_name) : "/aws/events/${var.event_rule_name}"
 }
 
 data "archive_file" "lambda_zip" {
@@ -89,6 +90,7 @@ resource "aws_lambda_function" "scheduler" {
   environment {
     variables = {
       ACCOUNTS_JSON      = jsonencode(var.accounts)
+      LOG_LEVEL          = var.log_level
       TIMEZONE           = var.timezone
       ENABLE_EC2         = tostring(var.enable_ec2)
       ENABLE_RDS         = tostring(var.enable_rds)
@@ -117,6 +119,55 @@ resource "aws_cloudwatch_event_target" "lambda" {
   rule      = aws_cloudwatch_event_rule.hourly.name
   target_id = "scheduler"
   arn       = aws_lambda_function.scheduler.arn
+}
+
+resource "aws_cloudwatch_log_group" "eventbridge" {
+  count = var.enable_eventbridge_logging ? 1 : 0
+
+  name              = local.eventbridge_log_group_name
+  retention_in_days = var.eventbridge_log_retention_in_days
+  tags              = var.tags
+}
+
+data "aws_iam_policy_document" "eventbridge_logs" {
+  count = var.enable_eventbridge_logging ? 1 : 0
+
+  statement {
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+
+    resources = ["${aws_cloudwatch_log_group.eventbridge[0].arn}:*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_cloudwatch_event_rule.hourly.arn]
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_resource_policy" "eventbridge" {
+  count = var.enable_eventbridge_logging ? 1 : 0
+
+  policy_name     = "${var.event_rule_name}-eventbridge-logs"
+  policy_document = data.aws_iam_policy_document.eventbridge_logs[0].json
+}
+
+resource "aws_cloudwatch_event_target" "logs" {
+  count = var.enable_eventbridge_logging ? 1 : 0
+
+  rule      = aws_cloudwatch_event_rule.hourly.name
+  target_id = "eventbridge-logs"
+  arn       = aws_cloudwatch_log_group.eventbridge[0].arn
+
+  depends_on = [aws_cloudwatch_log_resource_policy.eventbridge]
 }
 
 resource "aws_lambda_permission" "events" {

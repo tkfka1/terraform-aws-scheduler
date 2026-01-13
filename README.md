@@ -1,6 +1,6 @@
 # terraform-aws-scheduler
 
-EC2/RDS/ASG scheduler module using Lambda + EventBridge. It runs on an EventBridge schedule (default: hourly) and starts/stops resources based on tag-driven windows in a configurable timezone (default: Asia/Seoul).
+EC2/RDS/ASG scheduler module using Lambda + EventBridge. It runs on an EventBridge schedule (default: every 5 minutes) and starts/stops resources based on tag-driven windows in a configurable timezone (default: Asia/Seoul).
 
 Repository: https://github.com/tkfka1/terraform-aws-scheduler
 
@@ -12,6 +12,7 @@ Repository: https://github.com/tkfka1/terraform-aws-scheduler
 - Idempotent: no action if already in desired state
 - Optional RDS instance/cluster scheduling
 - Optional Auto Scaling Group scheduling (EKS self-managed)
+- Optional EventBridge logs to CloudWatch Logs
 
 ## Targets
 
@@ -54,7 +55,7 @@ module "scheduler" {
     }
   ]
 
-  schedule_expression = "rate(1 hour)"
+  schedule_expression = "rate(5 minutes)"
   timezone            = "Asia/Seoul"
 }
 ```
@@ -84,7 +85,10 @@ module "scheduler" {
   lambda_timeout_seconds = 60
   log_retention_in_days  = 30
   event_rule_name        = "ec2-scheduler-hourly"
-  schedule_expression    = "rate(1 hour)"
+  schedule_expression    = "rate(5 minutes)"
+  log_level              = "INFO"
+  enable_eventbridge_logging       = true
+  eventbridge_log_retention_in_days = 30
 
   tags = {
     Service = "scheduler"
@@ -116,6 +120,16 @@ module "scheduler" {
 }
 ```
 
+## EventBridge Logs (Optional)
+
+Enable CloudWatch Logs target for the EventBridge rule:
+
+```hcl
+enable_eventbridge_logging       = true
+eventbridge_log_group_name       = "/aws/events/ec2-scheduler-hourly"
+eventbridge_log_retention_in_days = 30
+```
+
 ## Auto Scaling Group Notes
 
 ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler reads those tags to restore capacity.
@@ -137,8 +151,12 @@ ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler
 - `lambda_timeout_seconds` (default: `60`)
 - `log_retention_in_days` (default: `30`)
 - `event_rule_name` (default: `ec2-scheduler-hourly`)
-- `schedule_expression` (default: `rate(1 hour)`)
+- `schedule_expression` (default: `rate(5 minutes)`)
+- `enable_eventbridge_logging` (default: `false`)
+- `eventbridge_log_group_name` (default: `""`, uses `/aws/events/<event_rule_name>`)
+- `eventbridge_log_retention_in_days` (default: `30`)
 - `tags` (default: `{}`)
+- `log_level` (default: `INFO`)
 - `timezone` (default: `Asia/Seoul`)
 - `enable_ec2` (default: `true`)
 - `enable_rds` (default: `false`)
@@ -157,6 +175,8 @@ ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler
 - `lambda_function_name`
 - `event_rule_arn`
 - `lambda_role_arn`
+- `eventbridge_log_group_name`
+- `eventbridge_log_group_arn`
 
 ## Target Account IAM Role
 

@@ -1,6 +1,6 @@
 # terraform-aws-scheduler
 
-Lambda + EventBridge로 동작하는 EC2/RDS/ASG 스케줄러 모듈입니다. EventBridge 스케줄(기본: 1시간)을 기준으로 실행되며, 지정한 시간대(기본: Asia/Seoul)에서 태그에 따라 리소스를 시작/중지합니다.
+Lambda + EventBridge로 동작하는 EC2/RDS/ASG 스케줄러 모듈입니다. EventBridge 스케줄(기본: 5분)을 기준으로 실행되며, 지정한 시간대(기본: Asia/Seoul)에서 태그에 따라 리소스를 시작/중지합니다.
 
 저장소: https://github.com/tkfka1/terraform-aws-scheduler
 
@@ -12,6 +12,7 @@ Lambda + EventBridge로 동작하는 EC2/RDS/ASG 스케줄러 모듈입니다. E
 - Idempotent 처리 (이미 원하는 상태면 아무 것도 안 함)
 - RDS 인스턴스/클러스터 스케줄링 옵션
 - Auto Scaling Group 스케줄링 옵션(EKS self-managed)
+- EventBridge 로그(CloudWatch Logs) 옵션
 
 ## 대상
 
@@ -54,7 +55,7 @@ module "scheduler" {
     }
   ]
 
-  schedule_expression = "rate(1 hour)"
+  schedule_expression = "rate(5 minutes)"
   timezone            = "Asia/Seoul"
 }
 ```
@@ -84,7 +85,10 @@ module "scheduler" {
   lambda_timeout_seconds = 60
   log_retention_in_days  = 30
   event_rule_name        = "ec2-scheduler-hourly"
-  schedule_expression    = "rate(1 hour)"
+  schedule_expression    = "rate(5 minutes)"
+  log_level              = "INFO"
+  enable_eventbridge_logging       = true
+  eventbridge_log_retention_in_days = 30
 
   tags = {
     Service = "scheduler"
@@ -116,6 +120,16 @@ module "scheduler" {
 }
 ```
 
+## EventBridge 로그 (옵션)
+
+EventBridge 규칙을 CloudWatch Logs 대상으로 기록하려면 아래 옵션을 사용합니다:
+
+```hcl
+enable_eventbridge_logging       = true
+eventbridge_log_group_name       = "/aws/events/ec2-scheduler-hourly"
+eventbridge_log_retention_in_days = 30
+```
+
 ## ASG 참고사항
 
 ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니다. 스케줄러가 태그를 생성하지 않습니다.
@@ -137,8 +151,12 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 - `lambda_timeout_seconds` (기본값: `60`)
 - `log_retention_in_days` (기본값: `30`)
 - `event_rule_name` (기본값: `ec2-scheduler-hourly`)
-- `schedule_expression` (기본값: `rate(1 hour)`)
+- `schedule_expression` (기본값: `rate(5 minutes)`)
+- `enable_eventbridge_logging` (기본값: `false`)
+- `eventbridge_log_group_name` (기본값: `""`, `/aws/events/<event_rule_name>` 사용)
+- `eventbridge_log_retention_in_days` (기본값: `30`)
 - `tags` (기본값: `{}`)
+- `log_level` (기본값: `INFO`)
 - `timezone` (기본값: `Asia/Seoul`)
 - `enable_ec2` (기본값: `true`)
 - `enable_rds` (기본값: `false`)
@@ -157,6 +175,8 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 - `lambda_function_name`
 - `event_rule_arn`
 - `lambda_role_arn`
+- `eventbridge_log_group_name`
+- `eventbridge_log_group_arn`
 
 ## 대상 계정 IAM Role
 

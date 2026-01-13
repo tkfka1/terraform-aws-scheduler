@@ -52,13 +52,37 @@ variable "event_rule_name" {
 variable "schedule_expression" {
   description = "EventBridge schedule expression (rate or cron)."
   type        = string
-  default     = "rate(1 hour)"
+  default     = "rate(5 minutes)"
+}
+
+variable "enable_eventbridge_logging" {
+  description = "Enable EventBridge rule logs to CloudWatch Logs."
+  type        = bool
+  default     = false
+}
+
+variable "eventbridge_log_group_name" {
+  description = "CloudWatch log group name for EventBridge logs. Empty uses /aws/events/<event_rule_name>."
+  type        = string
+  default     = ""
+}
+
+variable "eventbridge_log_retention_in_days" {
+  description = "EventBridge log retention in days."
+  type        = number
+  default     = 30
 }
 
 variable "tags" {
   description = "Tags applied to resources."
   type        = map(string)
   default     = {}
+}
+
+variable "log_level" {
+  description = "Lambda log level (DEBUG, INFO, WARNING, ERROR)."
+  type        = string
+  default     = "INFO"
 }
 
 variable "timezone" {

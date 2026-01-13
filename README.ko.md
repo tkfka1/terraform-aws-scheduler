@@ -44,7 +44,7 @@ EKS self-managed 노드가 Auto Scaling Group에 속해 있으면, 인스턴스�
 
 ```hcl
 module "scheduler" {
-  source = "./terraform-aws-scheduler"
+  source = "git::https://github.com/tkfka1/terraform-aws-scheduler.git"
 
   accounts = [
     {
@@ -63,7 +63,7 @@ module "scheduler" {
 
 ```hcl
 module "scheduler" {
-  source = "./terraform-aws-scheduler"
+  source = "git::https://github.com/tkfka1/terraform-aws-scheduler.git"
 
   accounts = [
     {
@@ -74,7 +74,7 @@ module "scheduler" {
       slack_webhook      = "https://hooks.slack.com/services/REPLACE_ME"
       telegram_bot_token = "123456:ABCDEF"
       telegram_chat_id   = "123456789"
-      description        = "UI3.0 GW TESTDR WEB"
+      description        = "WEB-SERVER"
     }
   ]
 

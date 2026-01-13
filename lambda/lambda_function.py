@@ -292,23 +292,45 @@ def _format_resource_label(resource_type):
     return mapping.get(resource_type, str(resource_type))
 
 
+def _render_table(headers, rows):
+    def _display_width(text):
+        width = 0
+        for ch in str(text):
+            width += 1 if ord(ch) < 128 else 2
+        return width
+
+    def _pad_cell(text, width):
+        text = str(text)
+        pad = width - _display_width(text)
+        if pad <= 0:
+            return text
+        return text + (" " * pad)
+
+    widths = [_display_width(header) for header in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], _display_width(cell))
+
+    def _line(values):
+        return "| " + " | ".join(
+            _pad_cell(values[idx], widths[idx]) for idx in range(len(values))
+        ) + " |"
+
+    def _border():
+        return "+-" + "-+-".join("-" * widths[idx] for idx in range(len(headers))) + "-+"
+
+    lines = [_border(), _line(headers), _border()]
+    for row in rows:
+        lines.append(_line(row))
+    lines.append(_border())
+    return lines
+
+
 def _format_change_extra(change):
     details = change.get("details") or ""
     tags = change.get("tag_summary") or ""
     parts = [part for part in (details, tags) if part]
     return "; ".join(parts)
-
-
-def _format_change_line(change):
-    action = _format_action_label(change.get("action"))
-    resource_type = _format_resource_label(change.get("resource_type"))
-    resource_id = change.get("resource_id") or ""
-    base_parts = [part for part in (action, resource_type, resource_id) if part]
-    base = " ".join(base_parts)
-    extra = _format_change_extra(change)
-    if extra:
-        return f"- {base} ({extra})"
-    return f"- {base}"
 
 
 def _build_text_message(account, changes, now):
@@ -325,8 +347,21 @@ def _build_text_message(account, changes, now):
         lines.append(" | ".join(account_parts))
 
     lines.append(f"Changes ({len(changes)}):")
-    for change in changes:
-        lines.append(_format_change_line(change))
+    if changes:
+        headers = ["Action", "Type", "Id", "Tags/Details"]
+        rows = []
+        for change in changes:
+            rows.append(
+                [
+                    _format_action_label(change.get("action")),
+                    _format_resource_label(change.get("resource_type")),
+                    change.get("resource_id") or "",
+                    _format_change_extra(change),
+                ]
+            )
+        lines.append("```")
+        lines.extend(_render_table(headers, rows))
+        lines.append("```")
     return "\n".join(lines)
 
 
@@ -351,15 +386,22 @@ def _build_telegram_message(account, changes, now):
         lines.append(" | ".join(account_parts))
 
     lines.append(f"Changes ({len(changes)}):")
-    for change in changes:
-        action = _escape_html(_format_action_label(change.get("action")))
-        resource_type = _escape_html(_format_resource_label(change.get("resource_type")))
-        resource_id = _escape_html(change.get("resource_id") or "-")
-        extra = _format_change_extra(change)
-        line = f"- {action} {resource_type} <code>{resource_id}</code>"
-        if extra:
-            line += f"\n  <i>{_escape_html(extra)}</i>"
-        lines.append(line)
+    if changes:
+        headers = ["Action", "Type", "Id", "Tags/Details"]
+        rows = []
+        for change in changes:
+            rows.append(
+                [
+                    _format_action_label(change.get("action")),
+                    _format_resource_label(change.get("resource_type")),
+                    change.get("resource_id") or "",
+                    _format_change_extra(change),
+                ]
+            )
+        table_text = "\n".join(_render_table(headers, rows))
+        lines.append("<pre>")
+        lines.append(_escape_html(table_text))
+        lines.append("</pre>")
     return "\n".join(lines)
 
 

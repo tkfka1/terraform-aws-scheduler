@@ -163,7 +163,7 @@ def _tags_to_dict(tags):
     return {tag.get("Key"): tag.get("Value") for tag in tags or [] if tag.get("Key")}
 
 
-def _format_notification_tags(tags, keys):
+def _extract_notification_tags(tags, keys):
     if not keys:
         return ""
     pairs = []
@@ -175,16 +175,17 @@ def _format_notification_tags(tags, keys):
         if not text:
             continue
         pairs.append(f"{key}={text}")
-    if not pairs:
-        return ""
-    return " (" + ", ".join(pairs) + ")"
+    return ", ".join(pairs)
 
 
-def _append_notification_tags(message, tags, keys):
-    suffix = _format_notification_tags(tags, keys)
-    if suffix:
-        return f"{message}{suffix}"
-    return message
+def _build_change(action, resource_type, resource_id, tags, notify_tag_keys, details=None):
+    return {
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "details": details,
+        "tag_summary": _extract_notification_tags(tags, notify_tag_keys),
+    }
 
 
 def _evaluate_schedule(tags, config, now_minutes, now_token):
@@ -258,11 +259,81 @@ def _post_json(url, payload):
         return
 
 
+def _format_action_label(action):
+    if not action:
+        return ""
+    mapping = {
+        "start": "🟢 Start",
+        "stop": "🔴 Stop",
+        "scale": "⚙️ Scale",
+    }
+    return mapping.get(action, str(action))
+
+
+def _format_resource_label(resource_type):
+    if not resource_type:
+        return ""
+    mapping = {
+        "ec2": "EC2",
+        "rds-instance": "RDS-Instance",
+        "rds-cluster": "RDS-Cluster",
+        "asg": "ASG",
+    }
+    return mapping.get(resource_type, str(resource_type))
+
+
+def _render_table(headers, rows):
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(str(cell)))
+
+    def _line(values):
+        return "| " + " | ".join(
+            str(values[idx]).ljust(widths[idx]) for idx in range(len(values))
+        ) + " |"
+
+    lines = [
+        _line(headers),
+        "| " + " | ".join("-" * widths[idx] for idx in range(len(headers))) + " |",
+    ]
+    for row in rows:
+        lines.append(_line(row))
+    return lines
+
+
 def _build_message(account, changes, now):
     header = f"[Scheduler] {account.get('description', account.get('account_id', 'account'))}"
     lines = [header, f"Time: {now.strftime('%Y-%m-%d %H:%M %Z')}"]
-    for change in changes:
-        lines.append(f"- {change}")
+    account_id = account.get("account_id")
+    region = account.get("region")
+    if account_id or region:
+        account_parts = []
+        if account_id:
+            account_parts.append(f"Account: {account_id}")
+        if region:
+            account_parts.append(f"Region: {region}")
+        lines.append(" | ".join(account_parts))
+
+    lines.append(f"Changes ({len(changes)}):")
+    if changes:
+        headers = ["Action", "Type", "Id", "Tags/Details"]
+        rows = []
+        for change in changes:
+            details = change.get("details") or ""
+            tags = change.get("tag_summary") or ""
+            extra = "; ".join(part for part in (details, tags) if part)
+            rows.append(
+                [
+                    _format_action_label(change.get("action")),
+                    _format_resource_label(change.get("resource_type")),
+                    change.get("resource_id") or "",
+                    extra,
+                ]
+            )
+        lines.append("```")
+        lines.extend(_render_table(headers, rows))
+        lines.append("```")
     return "\n".join(lines)
 
 
@@ -321,10 +392,10 @@ def _handle_instance(ec2, instance, config, now_minutes, now_token, notify_tag_k
 
     if should_run and state == "stopped":
         ec2.start_instances(InstanceIds=[instance_id])
-        return _append_notification_tags(f"started {instance_id}", tags, notify_tag_keys)
+        return _build_change("start", "ec2", instance_id, tags, notify_tag_keys)
     if (not should_run) and state == "running":
         ec2.stop_instances(InstanceIds=[instance_id])
-        return _append_notification_tags(f"stopped {instance_id}", tags, notify_tag_keys)
+        return _build_change("stop", "ec2", instance_id, tags, notify_tag_keys)
 
     return None
 
@@ -430,11 +501,11 @@ def _handle_autoscaling_group(
         ):
             return None
         asg.update_auto_scaling_group(AutoScalingGroupName=name, **target)
-        message = (
-            f"scaled asg {name} to min={target['MinSize']} "
+        details = (
+            f"min={target['MinSize']} "
             f"max={target['MaxSize']} desired={target['DesiredCapacity']}"
         )
-        return _append_notification_tags(message, tags, notify_tag_keys)
+        return _build_change("scale", "asg", name, tags, notify_tag_keys, details=details)
 
     if current["MinSize"] == 0 and current["MaxSize"] == 0 and current["DesiredCapacity"] == 0:
         return None
@@ -445,10 +516,13 @@ def _handle_autoscaling_group(
         MaxSize=0,
         DesiredCapacity=0,
     )
-    return _append_notification_tags(
-        f"scaled asg {name} to min=0 max=0 desired=0",
+    return _build_change(
+        "scale",
+        "asg",
+        name,
         tags,
         notify_tag_keys,
+        details="min=0 max=0 desired=0",
     )
 
 
@@ -468,15 +542,19 @@ def _handle_rds_instance(rds, instance, config, now_minutes, now_token, notify_t
     identifier = instance.get("DBInstanceIdentifier")
     if should_run and status == "stopped":
         rds.start_db_instance(DBInstanceIdentifier=identifier)
-        return _append_notification_tags(
-            f"started rds instance {identifier}",
+        return _build_change(
+            "start",
+            "rds-instance",
+            identifier,
             tags,
             notify_tag_keys,
         )
     if (not should_run) and status == "available":
         rds.stop_db_instance(DBInstanceIdentifier=identifier)
-        return _append_notification_tags(
-            f"stopped rds instance {identifier}",
+        return _build_change(
+            "stop",
+            "rds-instance",
+            identifier,
             tags,
             notify_tag_keys,
         )
@@ -497,15 +575,19 @@ def _handle_rds_cluster(rds, cluster, config, now_minutes, now_token, notify_tag
     identifier = cluster.get("DBClusterIdentifier")
     if should_run and status == "stopped":
         rds.start_db_cluster(DBClusterIdentifier=identifier)
-        return _append_notification_tags(
-            f"started rds cluster {identifier}",
+        return _build_change(
+            "start",
+            "rds-cluster",
+            identifier,
             tags,
             notify_tag_keys,
         )
     if (not should_run) and status == "available":
         rds.stop_db_cluster(DBClusterIdentifier=identifier)
-        return _append_notification_tags(
-            f"stopped rds cluster {identifier}",
+        return _build_change(
+            "stop",
+            "rds-cluster",
+            identifier,
             tags,
             notify_tag_keys,
         )

@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -238,19 +239,26 @@ def _send_teams(webhook, message):
     _post_json(webhook, payload)
 
 
-def _send_slack(webhook, message):
+def _send_slack(webhook, payload):
     if not webhook:
         return
-    payload = json.dumps({"text": message}).encode("utf-8")
-    _post_json(webhook, payload)
+    if isinstance(payload, str):
+        body = {"text": payload}
+    else:
+        body = payload
+    data = json.dumps(body).encode("utf-8")
+    _post_json(webhook, data)
 
 
-def _send_telegram(token, chat_id, message):
+def _send_telegram(token, chat_id, message, parse_mode=None):
     if not token or not chat_id:
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = json.dumps({"chat_id": chat_id, "text": message}).encode("utf-8")
-    _post_json(url, payload)
+    payload = {"chat_id": chat_id, "text": message}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    data = json.dumps(payload).encode("utf-8")
+    _post_json(url, data)
 
 
 def _post_json(url, payload):
@@ -284,41 +292,26 @@ def _format_resource_label(resource_type):
     return mapping.get(resource_type, str(resource_type))
 
 
-def _render_table(headers, rows):
-    def _display_width(text):
-        width = 0
-        for ch in str(text):
-            width += 1 if ord(ch) < 128 else 2
-        return width
-
-    def _pad_cell(text, width):
-        text = str(text)
-        pad = width - _display_width(text)
-        if pad <= 0:
-            return text
-        return text + (" " * pad)
-
-    widths = [_display_width(header) for header in headers]
-    for row in rows:
-        for idx, cell in enumerate(row):
-            widths[idx] = max(widths[idx], _display_width(cell))
-
-    def _line(values):
-        return "| " + " | ".join(
-            _pad_cell(values[idx], widths[idx]) for idx in range(len(values))
-        ) + " |"
-
-    def _border():
-        return "+-" + "-+-".join("-" * widths[idx] for idx in range(len(headers))) + "-+"
-
-    lines = [_border(), _line(headers), _border()]
-    for row in rows:
-        lines.append(_line(row))
-    lines.append(_border())
-    return lines
+def _format_change_extra(change):
+    details = change.get("details") or ""
+    tags = change.get("tag_summary") or ""
+    parts = [part for part in (details, tags) if part]
+    return "; ".join(parts)
 
 
-def _build_message(account, changes, now):
+def _format_change_line(change):
+    action = _format_action_label(change.get("action"))
+    resource_type = _format_resource_label(change.get("resource_type"))
+    resource_id = change.get("resource_id") or ""
+    base_parts = [part for part in (action, resource_type, resource_id) if part]
+    base = " ".join(base_parts)
+    extra = _format_change_extra(change)
+    if extra:
+        return f"- {base} ({extra})"
+    return f"- {base}"
+
+
+def _build_text_message(account, changes, now):
     header = f"[Scheduler] {account.get('description', account.get('account_id', 'account'))}"
     lines = [header, f"Time: {now.strftime('%Y-%m-%d %H:%M %Z')}"]
     account_id = account.get("account_id")
@@ -332,38 +325,112 @@ def _build_message(account, changes, now):
         lines.append(" | ".join(account_parts))
 
     lines.append(f"Changes ({len(changes)}):")
-    if changes:
-        headers = ["Action", "Type", "Id", "Tags/Details"]
-        rows = []
-        for change in changes:
-            details = change.get("details") or ""
-            tags = change.get("tag_summary") or ""
-            extra = "; ".join(part for part in (details, tags) if part)
-            rows.append(
-                [
-                    _format_action_label(change.get("action")),
-                    _format_resource_label(change.get("resource_type")),
-                    change.get("resource_id") or "",
-                    extra,
-                ]
-            )
-        lines.append("```")
-        lines.extend(_render_table(headers, rows))
-        lines.append("```")
+    for change in changes:
+        lines.append(_format_change_line(change))
     return "\n".join(lines)
+
+
+def _escape_html(text):
+    return html.escape(str(text), quote=False)
+
+
+def _build_telegram_message(account, changes, now):
+    title = account.get("description") or account.get("account_id") or "account"
+    lines = [
+        f"<b>[Scheduler] {_escape_html(title)}</b>",
+        f"Time: {_escape_html(now.strftime('%Y-%m-%d %H:%M %Z'))}",
+    ]
+    account_id = account.get("account_id")
+    region = account.get("region")
+    if account_id or region:
+        account_parts = []
+        if account_id:
+            account_parts.append(f"Account: {_escape_html(account_id)}")
+        if region:
+            account_parts.append(f"Region: {_escape_html(region)}")
+        lines.append(" | ".join(account_parts))
+
+    lines.append(f"Changes ({len(changes)}):")
+    for change in changes:
+        action = _escape_html(_format_action_label(change.get("action")))
+        resource_type = _escape_html(_format_resource_label(change.get("resource_type")))
+        resource_id = _escape_html(change.get("resource_id") or "-")
+        extra = _format_change_extra(change)
+        line = f"- {action} {resource_type} <code>{resource_id}</code>"
+        if extra:
+            line += f"\n  <i>{_escape_html(extra)}</i>"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _build_slack_payload(account, changes, now):
+    title = account.get("description") or account.get("account_id") or "account"
+    time_text = now.strftime("%Y-%m-%d %H:%M %Z")
+    text_fallback = _build_text_message(account, changes, now)
+
+    context_elements = [{"type": "mrkdwn", "text": f"*Time:* {time_text}"}]
+    account_id = account.get("account_id")
+    region = account.get("region")
+    if account_id or region:
+        account_parts = []
+        if account_id:
+            account_parts.append(f"*Account:* {account_id}")
+        if region:
+            account_parts.append(f"*Region:* {region}")
+        context_elements.append({"type": "mrkdwn", "text": " | ".join(account_parts)})
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"Scheduler | {title}"}},
+        {"type": "context", "elements": context_elements},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Changes ({len(changes)}):*"}},
+    ]
+
+    if len(changes) > 20:
+        lines = []
+        for change in changes:
+            extra = _format_change_extra(change)
+            resource_id = change.get("resource_id") or "-"
+            line = (
+                f"- {_format_action_label(change.get('action'))} "
+                f"{_format_resource_label(change.get('resource_type'))} `{resource_id}`"
+            )
+            if extra:
+                line += f" - {extra}"
+            lines.append(line)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        return {"text": text_fallback, "blocks": blocks}
+
+    for idx, change in enumerate(changes):
+        extra = _format_change_extra(change)
+        fields = [
+            {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
+            {"type": "mrkdwn", "text": f"*Type*\n{_format_resource_label(change.get('resource_type'))}"},
+            {"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"},
+            {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
+        ]
+        blocks.append({"type": "section", "fields": fields})
+        if idx != len(changes) - 1:
+            blocks.append({"type": "divider"})
+
+    return {"text": text_fallback, "blocks": blocks}
 
 
 def _maybe_send_notifications(account, changes, now):
     if not changes:
         return
 
-    message = _build_message(account, changes, now)
-    _send_teams(account.get("teams_webhook"), message)
-    _send_slack(account.get("slack_webhook"), message)
+    text_message = _build_text_message(account, changes, now)
+    slack_payload = _build_slack_payload(account, changes, now)
+    telegram_message = _build_telegram_message(account, changes, now)
+
+    _send_teams(account.get("teams_webhook"), text_message)
+    _send_slack(account.get("slack_webhook"), slack_payload)
     _send_telegram(
         account.get("telegram_bot_token"),
         account.get("telegram_chat_id"),
-        message,
+        telegram_message,
+        parse_mode="HTML",
     )
 
 

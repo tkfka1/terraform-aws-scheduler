@@ -103,6 +103,7 @@ resource "aws_lambda_function" "scheduler" {
       TAG_ASG_MIN_KEY    = var.tag_asg_min_key
       TAG_ASG_MAX_KEY    = var.tag_asg_max_key
       TAG_ASG_DESIRED_KEY = var.tag_asg_desired_key
+      NOTIFICATION_TAG_KEYS = jsonencode(var.notification_tag_keys)
     }
   }
 

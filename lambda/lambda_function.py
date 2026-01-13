@@ -42,6 +42,30 @@ def _normalize_tag_key(value, default):
     return value if value else default
 
 
+def _load_notification_tag_keys():
+    raw = os.environ.get("NOTIFICATION_TAG_KEYS", "")
+    if raw is None:
+        return []
+    raw = raw.strip()
+    if not raw:
+        return []
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = None
+
+    if isinstance(data, list):
+        keys = []
+        for item in data:
+            text = str(item).strip()
+            if text:
+                keys.append(text)
+        return keys
+
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _load_settings():
     schedule_value = os.environ.get("TAG_SCHEDULE_VALUE")
     if schedule_value is None:
@@ -65,6 +89,7 @@ def _load_settings():
             os.environ.get("TAG_ASG_DESIRED_KEY"),
             "Schedule_Asg_Desired",
         ),
+        "notification_tag_keys": _load_notification_tag_keys(),
     }
 
 
@@ -136,6 +161,30 @@ def _weekday_token(now):
 
 def _tags_to_dict(tags):
     return {tag.get("Key"): tag.get("Value") for tag in tags or [] if tag.get("Key")}
+
+
+def _format_notification_tags(tags, keys):
+    if not keys:
+        return ""
+    pairs = []
+    for key in keys:
+        value = tags.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        pairs.append(f"{key}={text}")
+    if not pairs:
+        return ""
+    return " (" + ", ".join(pairs) + ")"
+
+
+def _append_notification_tags(message, tags, keys):
+    suffix = _format_notification_tags(tags, keys)
+    if suffix:
+        return f"{message}{suffix}"
+    return message
 
 
 def _evaluate_schedule(tags, config, now_minutes, now_token):
@@ -262,7 +311,7 @@ def _collect_instances(ec2, tag_key, tag_value):
                 yield instance
 
 
-def _handle_instance(ec2, instance, config, now_minutes, now_token):
+def _handle_instance(ec2, instance, config, now_minutes, now_token, notify_tag_keys):
     instance_id = instance["InstanceId"]
     tags = _tags_to_dict(instance.get("Tags", []))
     should_run = _evaluate_schedule(tags, config, now_minutes, now_token)
@@ -272,10 +321,10 @@ def _handle_instance(ec2, instance, config, now_minutes, now_token):
 
     if should_run and state == "stopped":
         ec2.start_instances(InstanceIds=[instance_id])
-        return f"started {instance_id}"
+        return _append_notification_tags(f"started {instance_id}", tags, notify_tag_keys)
     if (not should_run) and state == "running":
         ec2.stop_instances(InstanceIds=[instance_id])
-        return f"stopped {instance_id}"
+        return _append_notification_tags(f"stopped {instance_id}", tags, notify_tag_keys)
 
     return None
 
@@ -342,7 +391,15 @@ def _sanitize_asg_target(target):
     return {"MinSize": min_size, "MaxSize": max_size, "DesiredCapacity": desired}
 
 
-def _handle_autoscaling_group(asg, group, tag_config, asg_keys, now_minutes, now_token):
+def _handle_autoscaling_group(
+    asg,
+    group,
+    tag_config,
+    asg_keys,
+    now_minutes,
+    now_token,
+    notify_tag_keys,
+):
     name = group.get("AutoScalingGroupName")
     if not name:
         return None
@@ -373,10 +430,11 @@ def _handle_autoscaling_group(asg, group, tag_config, asg_keys, now_minutes, now
         ):
             return None
         asg.update_auto_scaling_group(AutoScalingGroupName=name, **target)
-        return (
+        message = (
             f"scaled asg {name} to min={target['MinSize']} "
             f"max={target['MaxSize']} desired={target['DesiredCapacity']}"
         )
+        return _append_notification_tags(message, tags, notify_tag_keys)
 
     if current["MinSize"] == 0 and current["MaxSize"] == 0 and current["DesiredCapacity"] == 0:
         return None
@@ -387,10 +445,14 @@ def _handle_autoscaling_group(asg, group, tag_config, asg_keys, now_minutes, now
         MaxSize=0,
         DesiredCapacity=0,
     )
-    return f"scaled asg {name} to min=0 max=0 desired=0"
+    return _append_notification_tags(
+        f"scaled asg {name} to min=0 max=0 desired=0",
+        tags,
+        notify_tag_keys,
+    )
 
 
-def _handle_rds_instance(rds, instance, config, now_minutes, now_token):
+def _handle_rds_instance(rds, instance, config, now_minutes, now_token, notify_tag_keys):
     if instance.get("DBClusterIdentifier"):
         return None
     arn = instance.get("DBInstanceArn")
@@ -406,14 +468,22 @@ def _handle_rds_instance(rds, instance, config, now_minutes, now_token):
     identifier = instance.get("DBInstanceIdentifier")
     if should_run and status == "stopped":
         rds.start_db_instance(DBInstanceIdentifier=identifier)
-        return f"started rds instance {identifier}"
+        return _append_notification_tags(
+            f"started rds instance {identifier}",
+            tags,
+            notify_tag_keys,
+        )
     if (not should_run) and status == "available":
         rds.stop_db_instance(DBInstanceIdentifier=identifier)
-        return f"stopped rds instance {identifier}"
+        return _append_notification_tags(
+            f"stopped rds instance {identifier}",
+            tags,
+            notify_tag_keys,
+        )
     return None
 
 
-def _handle_rds_cluster(rds, cluster, config, now_minutes, now_token):
+def _handle_rds_cluster(rds, cluster, config, now_minutes, now_token, notify_tag_keys):
     arn = cluster.get("DBClusterArn")
     if not arn:
         return None
@@ -427,10 +497,18 @@ def _handle_rds_cluster(rds, cluster, config, now_minutes, now_token):
     identifier = cluster.get("DBClusterIdentifier")
     if should_run and status == "stopped":
         rds.start_db_cluster(DBClusterIdentifier=identifier)
-        return f"started rds cluster {identifier}"
+        return _append_notification_tags(
+            f"started rds cluster {identifier}",
+            tags,
+            notify_tag_keys,
+        )
     if (not should_run) and status == "available":
         rds.stop_db_cluster(DBClusterIdentifier=identifier)
-        return f"stopped rds cluster {identifier}"
+        return _append_notification_tags(
+            f"stopped rds cluster {identifier}",
+            tags,
+            notify_tag_keys,
+        )
     return None
 
 
@@ -469,6 +547,7 @@ def handler(event, context):
         "stop_key": settings["tag_stop_key"],
         "weekday_key": settings["tag_weekday_key"],
     }
+    notify_tag_keys = settings["notification_tag_keys"]
     asg_config = {
         "min_key": settings["tag_asg_min_key"],
         "max_key": settings["tag_asg_max_key"],
@@ -501,7 +580,14 @@ def handler(event, context):
                 tag_config["schedule_value"],
             ):
                 ec2_scanned += 1
-                change = _handle_instance(ec2, instance, tag_config, now_minutes, now_token)
+                change = _handle_instance(
+                    ec2,
+                    instance,
+                    tag_config,
+                    now_minutes,
+                    now_token,
+                    notify_tag_keys,
+                )
                 if change:
                     ec2_changes += 1
                     changes.append(change)
@@ -513,13 +599,27 @@ def handler(event, context):
         if settings["enable_rds"] and rds:
             for instance in _collect_rds_instances(rds):
                 rds_instance_scanned += 1
-                change = _handle_rds_instance(rds, instance, tag_config, now_minutes, now_token)
+                change = _handle_rds_instance(
+                    rds,
+                    instance,
+                    tag_config,
+                    now_minutes,
+                    now_token,
+                    notify_tag_keys,
+                )
                 if change:
                     rds_instance_changes += 1
                     changes.append(change)
             for cluster in _collect_rds_clusters(rds):
                 rds_cluster_scanned += 1
-                change = _handle_rds_cluster(rds, cluster, tag_config, now_minutes, now_token)
+                change = _handle_rds_cluster(
+                    rds,
+                    cluster,
+                    tag_config,
+                    now_minutes,
+                    now_token,
+                    notify_tag_keys,
+                )
                 if change:
                     rds_cluster_changes += 1
                     changes.append(change)
@@ -536,6 +636,7 @@ def handler(event, context):
                     asg_config,
                     now_minutes,
                     now_token,
+                    notify_tag_keys,
                 )
                 if change:
                     asg_changes += 1

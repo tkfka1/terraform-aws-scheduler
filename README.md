@@ -13,6 +13,7 @@ Repository: https://github.com/tkfka1/terraform-aws-scheduler
 - Optional RDS instance/cluster scheduling
 - Optional Auto Scaling Group scheduling (EKS self-managed)
 - Optional EventBridge logs to CloudWatch Logs
+- Optional extra tag values in notifications
 
 ## Targets
 
@@ -30,16 +31,100 @@ If EKS self-managed nodes are in Auto Scaling Groups, stopping individual instan
 
 Timezone is configurable (default: `Asia/Seoul`). If the timezone cannot be loaded, the function exits without doing anything.
 
-## Schedule Tags (EC2/RDS/ASG)
+## Schedule Tags (EC2)
 
-- `Schedule = True`
-- `Schedule_Start = 10` (hour or `HH:MM`)
-- `Schedule_Stop = 12` (hour or `HH:MM`)
-- `Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun` (required; only these weekdays run)
+Example (EC2 instance tags):
+
+```
+Schedule = True
+Schedule_Start = 10
+Schedule_Stop = 12
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Name = web-01
+```
+
+## Schedule Tags (RDS)
+
+Example (DB instance or cluster tags):
+
+```
+Schedule = True
+Schedule_Start = 09:00
+Schedule_Stop = 18:00
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Name = orders-db
+```
+
+## Schedule Tags (ASG)
+
+Example (Auto Scaling Group tags):
+
+```
+Schedule = True
+Schedule_Start = 08
+Schedule_Stop = 20
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Schedule_Asg_Min = 1
+Schedule_Asg_Max = 3
+Schedule_Asg_Desired = 2
+Name = eks-workers
+```
 
 Tag keys/values can be customized via module variables.
 
 This module does not create tags. Apply tags on EC2/RDS/ASG with your own Terraform or the console.
+You can include extra tag values in notifications with `notification_tag_keys` (e.g., `["Name"]`).
+
+## Schedule Tag Patterns
+
+Weekdays only (Mon-Fri, 09:00-18:00):
+
+```
+Schedule = True
+Schedule_Start = 09:00
+Schedule_Stop = 18:00
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+```
+
+Weekend only (Sat-Sun, 10-16):
+
+```
+Schedule = True
+Schedule_Start = 10
+Schedule_Stop = 16
+Schedule_Weekend = Sat,Sun
+```
+
+Specific weekdays only (Mon/Wed/Fri, 10-14):
+
+```
+Schedule = True
+Schedule_Start = 10
+Schedule_Stop = 14
+Schedule_Weekend = Mon,Wed,Fri
+```
+
+Overnight (crosses midnight, 22:00-02:00):
+
+```
+Schedule = True
+Schedule_Start = 22:00
+Schedule_Stop = 02:00
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun
+```
+
+Lunch break exclusion:
+
+Single tag set cannot express two windows (e.g., 09:00-12:00 and 13:00-18:00). Use custom logic or split the schedule across resources.
+
+Skip (start == stop):
+
+```
+Schedule = True
+Schedule_Start = 12
+Schedule_Stop = 12
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun
+```
 
 ## Usage (Minimal)
 
@@ -87,6 +172,7 @@ module "scheduler" {
   event_rule_name        = "ec2-scheduler-hourly"
   schedule_expression    = "rate(5 minutes)"
   log_level              = "INFO"
+  notification_tag_keys  = ["Name"]
   enable_eventbridge_logging       = true
   eventbridge_log_retention_in_days = 30
 
@@ -157,6 +243,7 @@ ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler
 - `eventbridge_log_retention_in_days` (default: `30`)
 - `tags` (default: `{}`)
 - `log_level` (default: `INFO`)
+- `notification_tag_keys` (default: `[]`)
 - `timezone` (default: `Asia/Seoul`)
 - `enable_ec2` (default: `true`)
 - `enable_rds` (default: `false`)

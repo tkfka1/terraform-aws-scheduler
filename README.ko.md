@@ -13,6 +13,7 @@ Lambda + EventBridge로 동작하는 EC2/RDS/ASG 스케줄러 모듈입니다. E
 - RDS 인스턴스/클러스터 스케줄링 옵션
 - Auto Scaling Group 스케줄링 옵션(EKS self-managed)
 - EventBridge 로그(CloudWatch Logs) 옵션
+- 알림에 추가 태그 값 출력 옵션
 
 ## 대상
 
@@ -30,16 +31,100 @@ EKS self-managed 노드가 Auto Scaling Group에 속해 있으면, 인스턴스�
 
 시간대는 설정 가능합니다(기본값: `Asia/Seoul`). 시간대 로드 실패 시 동작하지 않습니다.
 
-## 스케줄 태그 (EC2/RDS/ASG)
+## 스케줄 태그 (EC2)
 
-- `Schedule = True`
-- `Schedule_Start = 10` (시간 또는 `HH:MM`)
-- `Schedule_Stop = 12` (시간 또는 `HH:MM`)
-- `Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun` (필수, 지정된 요일만 동작)
+예시 (EC2 인스턴스 태그):
+
+```
+Schedule = True
+Schedule_Start = 10
+Schedule_Stop = 12
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Name = web-01
+```
+
+## 스케줄 태그 (RDS)
+
+예시 (DB 인스턴스/클러스터 태그):
+
+```
+Schedule = True
+Schedule_Start = 09:00
+Schedule_Stop = 18:00
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Name = orders-db
+```
+
+## 스케줄 태그 (ASG)
+
+예시 (Auto Scaling Group 태그):
+
+```
+Schedule = True
+Schedule_Start = 08
+Schedule_Stop = 20
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Schedule_Asg_Min = 1
+Schedule_Asg_Max = 3
+Schedule_Asg_Desired = 2
+Name = eks-workers
+```
 
 태그 키/값은 변수로 변경 가능합니다.
 
 이 모듈은 태그를 생성하지 않습니다. EC2/RDS/ASG 태그는 별도 Terraform이나 콘솔에서 적용하세요.
+`notification_tag_keys`로 알림 메시지에 표시할 태그를 지정할 수 있습니다(예: `["Name"]`).
+
+## 스케줄 태그 패턴
+
+평일만 (월-금, 09:00-18:00):
+
+```
+Schedule = True
+Schedule_Start = 09:00
+Schedule_Stop = 18:00
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+```
+
+주말만 (토-일, 10-16):
+
+```
+Schedule = True
+Schedule_Start = 10
+Schedule_Stop = 16
+Schedule_Weekend = Sat,Sun
+```
+
+특정 요일만 (월/수/금, 10-14):
+
+```
+Schedule = True
+Schedule_Start = 10
+Schedule_Stop = 14
+Schedule_Weekend = Mon,Wed,Fri
+```
+
+자정 넘김 (22:00-02:00):
+
+```
+Schedule = True
+Schedule_Start = 22:00
+Schedule_Stop = 02:00
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun
+```
+
+점심시간 제외:
+
+단일 태그 세트로는 2개 구간(예: 09:00-12:00, 13:00-18:00)을 표현할 수 없습니다. 이 경우 커스텀 로직을 추가하거나 스케줄을 분리해야 합니다.
+
+스킵 (start == stop):
+
+```
+Schedule = True
+Schedule_Start = 12
+Schedule_Stop = 12
+Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun
+```
 
 ## 사용 예시 (최소)
 
@@ -87,6 +172,7 @@ module "scheduler" {
   event_rule_name        = "ec2-scheduler-hourly"
   schedule_expression    = "rate(5 minutes)"
   log_level              = "INFO"
+  notification_tag_keys  = ["Name"]
   enable_eventbridge_logging       = true
   eventbridge_log_retention_in_days = 30
 
@@ -157,6 +243,7 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 - `eventbridge_log_retention_in_days` (기본값: `30`)
 - `tags` (기본값: `{}`)
 - `log_level` (기본값: `INFO`)
+- `notification_tag_keys` (기본값: `[]`)
 - `timezone` (기본값: `Asia/Seoul`)
 - `enable_ec2` (기본값: `true`)
 - `enable_rds` (기본값: `false`)

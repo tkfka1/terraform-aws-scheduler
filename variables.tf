@@ -85,6 +85,12 @@ variable "log_level" {
   default     = "INFO"
 }
 
+variable "notification_tag_keys" {
+  description = "Tag keys to include in notifications."
+  type        = list(string)
+  default     = []
+}
+
 variable "timezone" {
   description = "Timezone name for schedule evaluation."
   type        = string

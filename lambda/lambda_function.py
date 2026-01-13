@@ -283,14 +283,27 @@ def _format_resource_label(resource_type):
 
 
 def _render_table(headers, rows):
-    widths = [len(header) for header in headers]
+    def _display_width(text):
+        width = 0
+        for ch in str(text):
+            width += 1 if ord(ch) < 128 else 2
+        return width
+
+    def _pad_cell(text, width):
+        text = str(text)
+        pad = width - _display_width(text)
+        if pad <= 0:
+            return text
+        return text + (" " * pad)
+
+    widths = [_display_width(header) for header in headers]
     for row in rows:
         for idx, cell in enumerate(row):
-            widths[idx] = max(widths[idx], len(str(cell)))
+            widths[idx] = max(widths[idx], _display_width(cell))
 
     def _line(values):
         return "| " + " | ".join(
-            str(values[idx]).ljust(widths[idx]) for idx in range(len(values))
+            _pad_cell(values[idx], widths[idx]) for idx in range(len(values))
         ) + " |"
 
     lines = [

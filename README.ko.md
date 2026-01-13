@@ -82,7 +82,7 @@ module "scheduler" {
   lambda_function_name   = "ec2-scheduler"
   lambda_role_name       = "ec2-scheduler-lambda"
   lambda_memory_size     = 256
-  lambda_timeout_seconds = 60
+  lambda_timeout_seconds = 300
   log_retention_in_days  = 30
   event_rule_name        = "ec2-scheduler-hourly"
   schedule_expression    = "rate(5 minutes)"
@@ -148,7 +148,7 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 - `lambda_function_name` (기본값: `ec2-scheduler`)
 - `lambda_role_name` (기본값: `ec2-scheduler-lambda`)
 - `lambda_memory_size` (기본값: `256`)
-- `lambda_timeout_seconds` (기본값: `60`)
+- `lambda_timeout_seconds` (기본값: `300`)
 - `log_retention_in_days` (기본값: `30`)
 - `event_rule_name` (기본값: `ec2-scheduler-hourly`)
 - `schedule_expression` (기본값: `rate(5 minutes)`)

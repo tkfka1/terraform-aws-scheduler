@@ -82,7 +82,7 @@ module "scheduler" {
   lambda_function_name   = "ec2-scheduler"
   lambda_role_name       = "ec2-scheduler-lambda"
   lambda_memory_size     = 256
-  lambda_timeout_seconds = 60
+  lambda_timeout_seconds = 300
   log_retention_in_days  = 30
   event_rule_name        = "ec2-scheduler-hourly"
   schedule_expression    = "rate(5 minutes)"
@@ -148,7 +148,7 @@ ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler
 - `lambda_function_name` (default: `ec2-scheduler`)
 - `lambda_role_name` (default: `ec2-scheduler-lambda`)
 - `lambda_memory_size` (default: `256`)
-- `lambda_timeout_seconds` (default: `60`)
+- `lambda_timeout_seconds` (default: `300`)
 - `log_retention_in_days` (default: `30`)
 - `event_rule_name` (default: `ec2-scheduler-hourly`)
 - `schedule_expression` (default: `rate(5 minutes)`)

@@ -7,6 +7,7 @@ locals {
     )
   ]
   eventbridge_log_group_name = trimspace(var.eventbridge_log_group_name) != "" ? trimspace(var.eventbridge_log_group_name) : "/aws/events/${var.event_rule_name}"
+  verification_table_name    = trimspace(var.verification_table_name) != "" ? trimspace(var.verification_table_name) : "${var.lambda_function_name}-verification"
 }
 
 data "archive_file" "lambda_zip" {
@@ -68,6 +69,18 @@ data "aws_iam_policy_document" "lambda_policy" {
       resources = ["*"]
     }
   }
+
+  dynamic "statement" {
+    for_each = var.enable_verification ? [1] : []
+    content {
+      actions = [
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:Query",
+      ]
+      resources = [aws_dynamodb_table.verification[0].arn]
+    }
+  }
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
@@ -104,6 +117,10 @@ resource "aws_lambda_function" "scheduler" {
       TAG_ASG_MAX_KEY    = var.tag_asg_max_key
       TAG_ASG_DESIRED_KEY = var.tag_asg_desired_key
       NOTIFICATION_TAG_KEYS = jsonencode(var.notification_tag_keys)
+      ENABLE_VERIFICATION = tostring(var.enable_verification)
+      VERIFICATION_DELAY_MINUTES = tostring(var.verification_delay_minutes)
+      VERIFICATION_TABLE_NAME = local.verification_table_name
+      VERIFICATION_TTL_DAYS = tostring(var.verification_ttl_days)
     }
   }
 
@@ -120,6 +137,36 @@ resource "aws_cloudwatch_event_target" "lambda" {
   rule      = aws_cloudwatch_event_rule.hourly.name
   target_id = "scheduler"
   arn       = aws_lambda_function.scheduler.arn
+}
+
+resource "aws_dynamodb_table" "verification" {
+  count = var.enable_verification ? 1 : 0
+
+  name         = local.verification_table_name
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = var.tags
 }
 
 resource "aws_cloudwatch_log_group" "eventbridge" {

@@ -22,3 +22,13 @@ output "eventbridge_log_group_arn" {
   description = "EventBridge log group ARN (if enabled)."
   value       = var.enable_eventbridge_logging ? aws_cloudwatch_log_group.eventbridge[0].arn : null
 }
+
+output "verification_table_name" {
+  description = "Verification DynamoDB table name (if enabled)."
+  value       = var.enable_verification ? aws_dynamodb_table.verification[0].name : null
+}
+
+output "verification_table_arn" {
+  description = "Verification DynamoDB table ARN (if enabled)."
+  value       = var.enable_verification ? aws_dynamodb_table.verification[0].arn : null
+}

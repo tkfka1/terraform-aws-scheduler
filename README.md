@@ -14,6 +14,7 @@ Repository: https://github.com/tkfka1/terraform-aws-scheduler
 - Optional Auto Scaling Group scheduling (EKS self-managed)
 - Optional EventBridge logs to CloudWatch Logs
 - Optional extra tag values in notifications
+- Optional delayed verification of start/stop/scale actions (DynamoDB)
 
 ## Targets
 
@@ -173,6 +174,10 @@ module "scheduler" {
   schedule_expression    = "rate(5 minutes)"
   log_level              = "INFO"
   notification_tag_keys  = ["Name"]
+  enable_verification           = true
+  verification_delay_minutes    = 30
+  verification_table_name       = "scheduler-verification"
+  verification_ttl_days         = 7
   enable_eventbridge_logging       = true
   eventbridge_log_retention_in_days = 30
 
@@ -216,6 +221,18 @@ eventbridge_log_group_name       = "/aws/events/ec2-scheduler-hourly"
 eventbridge_log_retention_in_days = 30
 ```
 
+## Verification (Optional)
+
+Record start/stop/scale actions in DynamoDB and verify after a delay. The scheduler reports:
+`✅ 완료`, `⏳ 진행`, or `❌ 스케줄링 오류`.
+
+```hcl
+enable_verification        = true
+verification_delay_minutes = 30
+verification_table_name    = "scheduler-verification"
+verification_ttl_days      = 7
+```
+
 ## Auto Scaling Group Notes
 
 ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler reads those tags to restore capacity.
@@ -244,6 +261,10 @@ ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler
 - `tags` (default: `{}`)
 - `log_level` (default: `INFO`)
 - `notification_tag_keys` (default: `[]`)
+- `enable_verification` (default: `false`)
+- `verification_delay_minutes` (default: `30`)
+- `verification_table_name` (default: `""`, uses `<lambda_function_name>-verification`)
+- `verification_ttl_days` (default: `7`)
 - `timezone` (default: `Asia/Seoul`)
 - `enable_ec2` (default: `true`)
 - `enable_rds` (default: `false`)
@@ -264,6 +285,8 @@ ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler
 - `lambda_role_arn`
 - `eventbridge_log_group_name`
 - `eventbridge_log_group_arn`
+- `verification_table_name`
+- `verification_table_arn`
 
 ## Target Account IAM Role
 
@@ -350,7 +373,7 @@ If `enable_asg = true`, add ASG permissions:
 
 - Teams/Slack can be empty to skip that channel.
 - Telegram only sends when both `telegram_bot_token` and `telegram_chat_id` are set.
-- Notifications are sent only when changes occur.
+- Notifications are sent when changes occur or verification results are available.
 
 ## Notes
 

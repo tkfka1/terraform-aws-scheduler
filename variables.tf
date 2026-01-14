@@ -91,6 +91,30 @@ variable "notification_tag_keys" {
   default     = []
 }
 
+variable "enable_verification" {
+  description = "Enable delayed verification for start/stop/scale actions using DynamoDB."
+  type        = bool
+  default     = false
+}
+
+variable "verification_delay_minutes" {
+  description = "Delay in minutes before verification runs."
+  type        = number
+  default     = 30
+}
+
+variable "verification_table_name" {
+  description = "DynamoDB table name for verification records. Empty uses <lambda_function_name>-verification."
+  type        = string
+  default     = ""
+}
+
+variable "verification_ttl_days" {
+  description = "TTL in days for verification records."
+  type        = number
+  default     = 7
+}
+
 variable "timezone" {
   description = "Timezone name for schedule evaluation."
   type        = string

@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 
 import boto3
+from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 try:
     from zoneinfo import ZoneInfo
@@ -34,6 +36,19 @@ def _env_bool(name, default):
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
 
 
 def _normalize_tag_key(value, default):
@@ -91,6 +106,10 @@ def _load_settings():
             "Schedule_Asg_Desired",
         ),
         "notification_tag_keys": _load_notification_tag_keys(),
+        "enable_verification": _env_bool("ENABLE_VERIFICATION", False),
+        "verification_delay_minutes": _env_int("VERIFICATION_DELAY_MINUTES", 30),
+        "verification_table_name": (os.environ.get("VERIFICATION_TABLE_NAME", "").strip()),
+        "verification_ttl_days": _env_int("VERIFICATION_TTL_DAYS", 7),
     }
 
 
@@ -179,7 +198,16 @@ def _extract_notification_tags(tags, keys):
     return ", ".join(pairs)
 
 
-def _build_change(action, resource_type, resource_id, tags, notify_tag_keys, details=None):
+def _build_change(
+    action,
+    resource_type,
+    resource_id,
+    tags,
+    notify_tag_keys,
+    details=None,
+    expected_state=None,
+    desired_sizes=None,
+):
     change = {
         "action": action,
         "resource_type": resource_type,
@@ -188,6 +216,10 @@ def _build_change(action, resource_type, resource_id, tags, notify_tag_keys, det
     }
     if details:
         change["details"] = details
+    if expected_state:
+        change["expected_state"] = expected_state
+    if desired_sizes:
+        change["desired_sizes"] = desired_sizes
     return change
 
 
@@ -292,6 +324,17 @@ def _format_resource_label(resource_type):
     return mapping.get(resource_type, str(resource_type))
 
 
+def _format_status_label(status):
+    if not status:
+        return ""
+    mapping = {
+        "completed": "✅ 완료",
+        "in_progress": "⏳ 진행",
+        "error": "❌ 스케줄링 오류",
+    }
+    return mapping.get(status, str(status))
+
+
 def _render_table(headers, rows):
     def _display_width(text):
         width = 0
@@ -333,7 +376,297 @@ def _format_change_extra(change):
     return "; ".join(parts)
 
 
-def _build_text_message(account, changes, now):
+def _verification_enabled(settings):
+    if not settings.get("enable_verification"):
+        return False
+    if not settings.get("verification_table_name"):
+        logger.warning("Verification enabled but VERIFICATION_TABLE_NAME is empty.")
+        return False
+    return True
+
+
+def _verification_delay_seconds(settings):
+    delay = settings.get("verification_delay_minutes") or 0
+    if delay < 0:
+        delay = 0
+    return int(delay) * 60
+
+
+def _verification_ttl_seconds(settings):
+    ttl_days = settings.get("verification_ttl_days") or 0
+    if ttl_days < 1:
+        ttl_days = 1
+    return int(ttl_days) * 86400
+
+
+def _expected_state_for_action(resource_type, action):
+    if resource_type == "ec2":
+        return "running" if action == "start" else "stopped"
+    if resource_type in {"rds-instance", "rds-cluster"}:
+        return "available" if action == "start" else "stopped"
+    return None
+
+
+def _prune_item(item):
+    cleaned = {}
+    for key, value in item.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and value == "":
+            continue
+        if isinstance(value, dict):
+            nested = {k: v for k, v in value.items() if v is not None}
+            if not nested:
+                continue
+            cleaned[key] = nested
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _build_verification_item(account, change, settings, now):
+    requested_at = int(now.timestamp())
+    verify_at = requested_at + _verification_delay_seconds(settings)
+    expires_at = verify_at + _verification_ttl_seconds(settings)
+    resource_type = change.get("resource_type") or "unknown"
+    resource_id = change.get("resource_id") or "unknown"
+    action = change.get("action") or "unknown"
+    sk = f"{verify_at:010d}#{requested_at}#{action}#{resource_type}#{resource_id}"
+
+    expected_state = change.get("expected_state") or _expected_state_for_action(
+        resource_type,
+        action,
+    )
+
+    item = {
+        "pk": "PENDING",
+        "sk": sk,
+        "account_id": account.get("account_id"),
+        "region": account.get("region"),
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "action": action,
+        "requested_at": requested_at,
+        "verify_at": verify_at,
+        "expires_at": expires_at,
+        "expected_state": expected_state,
+        "tag_summary": change.get("tag_summary"),
+        "details": change.get("details"),
+        "desired_sizes": change.get("desired_sizes"),
+    }
+    return _prune_item(item)
+
+
+def _record_verifications(table, account, changes, settings, now):
+    if not changes:
+        return
+    for change in changes:
+        item = _build_verification_item(account, change, settings, now)
+        table.put_item(Item=item)
+
+
+def _query_due_verifications(table, now):
+    now_epoch = int(now.timestamp())
+    max_key = f"{now_epoch:010d}~"
+    items = []
+    params = {
+        "KeyConditionExpression": Key("pk").eq("PENDING") & Key("sk").lte(max_key),
+    }
+    while True:
+        resp = table.query(**params)
+        items.extend(resp.get("Items", []))
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        params["ExclusiveStartKey"] = last_key
+    return items
+
+
+def _delete_verification_item(table, item):
+    try:
+        table.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+    except Exception:
+        logger.exception("Failed to delete verification item.")
+
+
+def _build_verification_result(item, status, details=None):
+    result = {
+        "status": status,
+        "action": item.get("action"),
+        "resource_type": item.get("resource_type"),
+        "resource_id": item.get("resource_id"),
+        "tag_summary": item.get("tag_summary"),
+    }
+    if details:
+        result["details"] = details
+    return result
+
+
+def _verify_ec2(ec2, item):
+    resource_id = item.get("resource_id")
+    expected_state = item.get("expected_state") or _expected_state_for_action(
+        "ec2",
+        item.get("action"),
+    )
+    try:
+        resp = ec2.describe_instances(InstanceIds=[resource_id])
+    except ClientError as exc:
+        return "error", f"error={exc.response.get('Error', {}).get('Code', 'Unknown')}"
+    reservations = resp.get("Reservations", [])
+    if not reservations or not reservations[0].get("Instances"):
+        return "error", "not_found"
+    state = reservations[0]["Instances"][0].get("State", {}).get("Name")
+    if state == expected_state:
+        return "completed", f"state={state}"
+    if state in {"pending", "stopping", "shutting-down"}:
+        return "in_progress", f"state={state} expected={expected_state}"
+    return "error", f"state={state} expected={expected_state}"
+
+
+def _verify_rds_instance(rds, item):
+    resource_id = item.get("resource_id")
+    expected_state = item.get("expected_state") or _expected_state_for_action(
+        "rds-instance",
+        item.get("action"),
+    )
+    try:
+        resp = rds.describe_db_instances(DBInstanceIdentifier=resource_id)
+    except ClientError as exc:
+        return "error", f"error={exc.response.get('Error', {}).get('Code', 'Unknown')}"
+    instances = resp.get("DBInstances", [])
+    if not instances:
+        return "error", "not_found"
+    status = instances[0].get("DBInstanceStatus")
+    if status == expected_state:
+        return "completed", f"status={status}"
+    if status in {"starting", "stopping", "modifying", "backing-up", "rebooting"}:
+        return "in_progress", f"status={status} expected={expected_state}"
+    return "error", f"status={status} expected={expected_state}"
+
+
+def _verify_rds_cluster(rds, item):
+    resource_id = item.get("resource_id")
+    expected_state = item.get("expected_state") or _expected_state_for_action(
+        "rds-cluster",
+        item.get("action"),
+    )
+    try:
+        resp = rds.describe_db_clusters(DBClusterIdentifier=resource_id)
+    except ClientError as exc:
+        return "error", f"error={exc.response.get('Error', {}).get('Code', 'Unknown')}"
+    clusters = resp.get("DBClusters", [])
+    if not clusters:
+        return "error", "not_found"
+    status = clusters[0].get("Status")
+    if status == expected_state:
+        return "completed", f"status={status}"
+    if status in {"starting", "stopping", "modifying"}:
+        return "in_progress", f"status={status} expected={expected_state}"
+    return "error", f"status={status} expected={expected_state}"
+
+
+def _verify_asg(asg, item):
+    resource_id = item.get("resource_id")
+    desired_sizes = item.get("desired_sizes") or {}
+    try:
+        resp = asg.describe_auto_scaling_groups(AutoScalingGroupNames=[resource_id])
+    except ClientError as exc:
+        return "error", f"error={exc.response.get('Error', {}).get('Code', 'Unknown')}"
+    groups = resp.get("AutoScalingGroups", [])
+    if not groups:
+        return "error", "not_found"
+    current = _asg_sizes(groups[0])
+    if not desired_sizes:
+        return "error", "missing_desired_sizes"
+    expected_min = _parse_int(desired_sizes.get("MinSize"))
+    expected_max = _parse_int(desired_sizes.get("MaxSize"))
+    expected_desired = _parse_int(desired_sizes.get("DesiredCapacity"))
+    if (
+        current.get("MinSize") == expected_min
+        and current.get("MaxSize") == expected_max
+        and current.get("DesiredCapacity") == expected_desired
+    ):
+        return "completed", (
+            f"min={current.get('MinSize')} max={current.get('MaxSize')} "
+            f"desired={current.get('DesiredCapacity')}"
+        )
+    return "error", (
+        f"min={current.get('MinSize')} max={current.get('MaxSize')} "
+        f"desired={current.get('DesiredCapacity')} expected="
+        f"{expected_min}/{expected_max}/{expected_desired}"
+    )
+
+
+def _process_verifications(base_session, accounts, settings, now, table):
+    results = {}
+    try:
+        due_items = _query_due_verifications(table, now)
+    except Exception:
+        logger.exception("Failed to query verification items.")
+        return results
+
+    if not due_items:
+        return results
+
+    account_lookup = {(acc.get("account_id"), acc.get("region")): acc for acc in accounts}
+    grouped = {}
+    for item in due_items:
+        key = (item.get("account_id"), item.get("region"))
+        grouped.setdefault(key, []).append(item)
+
+    for key, items in grouped.items():
+        account = account_lookup.get(key)
+        if not account:
+            for item in items:
+                results.setdefault(key, []).append(
+                    _build_verification_result(item, "error", "account_not_found")
+                )
+                _delete_verification_item(table, item)
+            continue
+
+        try:
+            target_session = _assume_role(base_session, account["account_id"], account["iam_role"])
+        except Exception:
+            for item in items:
+                results.setdefault(key, []).append(
+                    _build_verification_result(item, "error", "assume_role_failed")
+                )
+                _delete_verification_item(table, item)
+            continue
+
+        ec2 = None
+        rds = None
+        asg = None
+        for item in items:
+            resource_type = item.get("resource_type")
+            if resource_type == "ec2":
+                if ec2 is None:
+                    ec2 = target_session.client("ec2", region_name=account["region"])
+                status, details = _verify_ec2(ec2, item)
+            elif resource_type == "rds-instance":
+                if rds is None:
+                    rds = target_session.client("rds", region_name=account["region"])
+                status, details = _verify_rds_instance(rds, item)
+            elif resource_type == "rds-cluster":
+                if rds is None:
+                    rds = target_session.client("rds", region_name=account["region"])
+                status, details = _verify_rds_cluster(rds, item)
+            elif resource_type == "asg":
+                if asg is None:
+                    asg = target_session.client("autoscaling", region_name=account["region"])
+                status, details = _verify_asg(asg, item)
+            else:
+                status, details = "error", "unsupported_resource"
+
+            results.setdefault(key, []).append(_build_verification_result(item, status, details))
+            _delete_verification_item(table, item)
+
+    return results
+
+
+def _build_text_message(account, changes, verifications, now):
+    changes = changes or []
+    verifications = verifications or []
     header = f"[Scheduler] {account.get('description', account.get('account_id', 'account'))}"
     lines = [header, f"Time: {now.strftime('%Y-%m-%d %H:%M %Z')}"]
     account_id = account.get("account_id")
@@ -362,6 +695,24 @@ def _build_text_message(account, changes, now):
         lines.append("```")
         lines.extend(_render_table(headers, rows))
         lines.append("```")
+
+    if verifications:
+        lines.append(f"Verification ({len(verifications)}):")
+        headers = ["Status", "Action", "Type", "Id", "Tags/Details"]
+        rows = []
+        for verification in verifications:
+            rows.append(
+                [
+                    _format_status_label(verification.get("status")),
+                    _format_action_label(verification.get("action")),
+                    _format_resource_label(verification.get("resource_type")),
+                    verification.get("resource_id") or "",
+                    _format_change_extra(verification),
+                ]
+            )
+        lines.append("```")
+        lines.extend(_render_table(headers, rows))
+        lines.append("```")
     return "\n".join(lines)
 
 
@@ -369,7 +720,9 @@ def _escape_html(text):
     return html.escape(str(text), quote=False)
 
 
-def _build_telegram_message(account, changes, now):
+def _build_telegram_message(account, changes, verifications, now):
+    changes = changes or []
+    verifications = verifications or []
     title = account.get("description") or account.get("account_id") or "account"
     lines = [
         f"<b>[Scheduler] {_escape_html(title)}</b>",
@@ -402,13 +755,34 @@ def _build_telegram_message(account, changes, now):
         lines.append("<pre>")
         lines.append(_escape_html(table_text))
         lines.append("</pre>")
+
+    if verifications:
+        lines.append(f"Verification ({len(verifications)}):")
+        headers = ["Status", "Action", "Type", "Id", "Tags/Details"]
+        rows = []
+        for verification in verifications:
+            rows.append(
+                [
+                    _format_status_label(verification.get("status")),
+                    _format_action_label(verification.get("action")),
+                    _format_resource_label(verification.get("resource_type")),
+                    verification.get("resource_id") or "",
+                    _format_change_extra(verification),
+                ]
+            )
+        table_text = "\n".join(_render_table(headers, rows))
+        lines.append("<pre>")
+        lines.append(_escape_html(table_text))
+        lines.append("</pre>")
     return "\n".join(lines)
 
 
-def _build_slack_payload(account, changes, now):
+def _build_slack_payload(account, changes, verifications, now):
+    changes = changes or []
+    verifications = verifications or []
     title = account.get("description") or account.get("account_id") or "account"
     time_text = now.strftime("%Y-%m-%d %H:%M %Z")
-    text_fallback = _build_text_message(account, changes, now)
+    text_fallback = _build_text_message(account, changes, verifications, now)
 
     context_elements = [{"type": "mrkdwn", "text": f"*Time:* {time_text}"}]
     account_id = account.get("account_id")
@@ -425,9 +799,11 @@ def _build_slack_payload(account, changes, now):
         {"type": "header", "text": {"type": "plain_text", "text": f"Scheduler | {title}"}},
         {"type": "context", "elements": context_elements},
         {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Changes ({len(changes)}):*"}},
     ]
 
+    blocks.append(
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Changes ({len(changes)}):*"}}
+    )
     if len(changes) > 20:
         lines = []
         for change in changes:
@@ -440,31 +816,76 @@ def _build_slack_payload(account, changes, now):
             if extra:
                 line += f" - {extra}"
             lines.append(line)
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        return {"text": text_fallback, "blocks": blocks}
+        if lines:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+    else:
+        for idx, change in enumerate(changes):
+            extra = _format_change_extra(change)
+            fields = [
+                {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
+                {"type": "mrkdwn", "text": f"*Type*\n{_format_resource_label(change.get('resource_type'))}"},
+                {"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"},
+                {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
+            ]
+            blocks.append({"type": "section", "fields": fields})
+            if idx != len(changes) - 1:
+                blocks.append({"type": "divider"})
 
-    for idx, change in enumerate(changes):
-        extra = _format_change_extra(change)
-        fields = [
-            {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
-            {"type": "mrkdwn", "text": f"*Type*\n{_format_resource_label(change.get('resource_type'))}"},
-            {"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"},
-            {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
-        ]
-        blocks.append({"type": "section", "fields": fields})
-        if idx != len(changes) - 1:
-            blocks.append({"type": "divider"})
+    if verifications:
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Verification ({len(verifications)}):*"},
+            }
+        )
+        if len(verifications) > 20:
+            lines = []
+            for verification in verifications:
+                extra = _format_change_extra(verification)
+                resource_id = verification.get("resource_id") or "-"
+                line = (
+                    f"- {_format_status_label(verification.get('status'))} "
+                    f"{_format_action_label(verification.get('action'))} "
+                    f"{_format_resource_label(verification.get('resource_type'))} `{resource_id}`"
+                )
+                if extra:
+                    line += f" - {extra}"
+                lines.append(line)
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        else:
+            for idx, verification in enumerate(verifications):
+                extra = _format_change_extra(verification)
+                fields = [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Status*\n{_format_status_label(verification.get('status'))}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Action*\n{_format_action_label(verification.get('action'))}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Type*\n{_format_resource_label(verification.get('resource_type'))}",
+                    },
+                    {"type": "mrkdwn", "text": f"*Id*\n`{verification.get('resource_id') or '-'}`"},
+                    {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
+                ]
+                blocks.append({"type": "section", "fields": fields})
+                if idx != len(verifications) - 1:
+                    blocks.append({"type": "divider"})
 
     return {"text": text_fallback, "blocks": blocks}
 
 
-def _maybe_send_notifications(account, changes, now):
-    if not changes:
+def _maybe_send_notifications(account, changes, verifications, now):
+    if not changes and not verifications:
         return
 
-    text_message = _build_text_message(account, changes, now)
-    slack_payload = _build_slack_payload(account, changes, now)
-    telegram_message = _build_telegram_message(account, changes, now)
+    text_message = _build_text_message(account, changes, verifications, now)
+    slack_payload = _build_slack_payload(account, changes, verifications, now)
+    telegram_message = _build_telegram_message(account, changes, verifications, now)
 
     _send_teams(account.get("teams_webhook"), text_message)
     _send_slack(account.get("slack_webhook"), slack_payload)
@@ -517,10 +938,24 @@ def _handle_instance(ec2, instance, config, now_minutes, now_token, notify_tag_k
 
     if should_run and state == "stopped":
         ec2.start_instances(InstanceIds=[instance_id])
-        return _build_change("start", "ec2", instance_id, tags, notify_tag_keys)
+        return _build_change(
+            "start",
+            "ec2",
+            instance_id,
+            tags,
+            notify_tag_keys,
+            expected_state="running",
+        )
     if (not should_run) and state == "running":
         ec2.stop_instances(InstanceIds=[instance_id])
-        return _build_change("stop", "ec2", instance_id, tags, notify_tag_keys)
+        return _build_change(
+            "stop",
+            "ec2",
+            instance_id,
+            tags,
+            notify_tag_keys,
+            expected_state="stopped",
+        )
 
     return None
 
@@ -630,7 +1065,15 @@ def _handle_autoscaling_group(
             f"min={target['MinSize']} "
             f"max={target['MaxSize']} desired={target['DesiredCapacity']}"
         )
-        return _build_change("scale", "asg", name, tags, notify_tag_keys, details=details)
+        return _build_change(
+            "scale",
+            "asg",
+            name,
+            tags,
+            notify_tag_keys,
+            details=details,
+            desired_sizes=target,
+        )
 
     if current["MinSize"] == 0 and current["MaxSize"] == 0 and current["DesiredCapacity"] == 0:
         return None
@@ -648,6 +1091,7 @@ def _handle_autoscaling_group(
         tags,
         notify_tag_keys,
         details="min=0 max=0 desired=0",
+        desired_sizes={"MinSize": 0, "MaxSize": 0, "DesiredCapacity": 0},
     )
 
 
@@ -673,6 +1117,7 @@ def _handle_rds_instance(rds, instance, config, now_minutes, now_token, notify_t
             identifier,
             tags,
             notify_tag_keys,
+            expected_state="available",
         )
     if (not should_run) and status == "available":
         rds.stop_db_instance(DBInstanceIdentifier=identifier)
@@ -682,6 +1127,7 @@ def _handle_rds_instance(rds, instance, config, now_minutes, now_token, notify_t
             identifier,
             tags,
             notify_tag_keys,
+            expected_state="stopped",
         )
     return None
 
@@ -706,6 +1152,7 @@ def _handle_rds_cluster(rds, cluster, config, now_minutes, now_token, notify_tag
             identifier,
             tags,
             notify_tag_keys,
+            expected_state="available",
         )
     if (not should_run) and status == "available":
         rds.stop_db_cluster(DBClusterIdentifier=identifier)
@@ -715,6 +1162,7 @@ def _handle_rds_cluster(rds, cluster, config, now_minutes, now_token, notify_tag
             identifier,
             tags,
             notify_tag_keys,
+            expected_state="stopped",
         )
     return None
 
@@ -746,6 +1194,24 @@ def handler(event, context):
     base_session = boto3.Session()
 
     summary = []
+    verification_table = None
+    verification_results = {}
+
+    if _verification_enabled(settings):
+        try:
+            verification_table = boto3.resource("dynamodb").Table(
+                settings["verification_table_name"]
+            )
+            verification_results = _process_verifications(
+                base_session,
+                accounts,
+                settings,
+                now,
+                verification_table,
+            )
+        except Exception:
+            logger.exception("Verification disabled due to DynamoDB error.")
+            verification_table = None
 
     tag_config = {
         "schedule_key": settings["tag_schedule_key"],
@@ -765,6 +1231,8 @@ def handler(event, context):
         _validate_account(account)
         target_session = _assume_role(base_session, account["account_id"], account["iam_role"])
         changes = []
+        verification_key = (account.get("account_id"), account.get("region"))
+        verifications = verification_results.get(verification_key, [])
 
         needs_ec2 = settings["enable_ec2"]
         needs_rds = settings["enable_rds"]
@@ -871,7 +1339,19 @@ def handler(event, context):
         else:
             logger.info("account=%s no changes", account.get("account_id"))
 
-        _maybe_send_notifications(account, changes, now)
-        summary.append({"account": account.get("account_id"), "changes": changes})
+        if verifications:
+            logger.info("account=%s verifications=%s", account.get("account_id"), verifications)
+
+        if verification_table and changes:
+            _record_verifications(verification_table, account, changes, settings, now)
+
+        _maybe_send_notifications(account, changes, verifications, now)
+        summary.append(
+            {
+                "account": account.get("account_id"),
+                "changes": changes,
+                "verifications": verifications,
+            }
+        )
 
     return {"status": "ok", "summary": summary}

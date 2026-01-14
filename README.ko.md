@@ -14,6 +14,7 @@ Lambda + EventBridge로 동작하는 EC2/RDS/ASG 스케줄러 모듈입니다. E
 - Auto Scaling Group 스케줄링 옵션(EKS self-managed)
 - EventBridge 로그(CloudWatch Logs) 옵션
 - 알림에 추가 태그 값 출력 옵션
+- 지연 검증(완료/진행/오류) 옵션(DynamoDB)
 
 ## 대상
 
@@ -173,6 +174,10 @@ module "scheduler" {
   schedule_expression    = "rate(5 minutes)"
   log_level              = "INFO"
   notification_tag_keys  = ["Name"]
+  enable_verification           = true
+  verification_delay_minutes    = 30
+  verification_table_name       = "scheduler-verification"
+  verification_ttl_days         = 7
   enable_eventbridge_logging       = true
   eventbridge_log_retention_in_days = 30
 
@@ -216,6 +221,18 @@ eventbridge_log_group_name       = "/aws/events/ec2-scheduler-hourly"
 eventbridge_log_retention_in_days = 30
 ```
 
+## 지연 검증 (옵션)
+
+시작/중지/스케일 작업을 DynamoDB에 기록하고, 일정 시간 후 상태를 검증합니다.
+알림에 `✅ 완료`, `⏳ 진행`, `❌ 스케줄링 오류`로 표시됩니다.
+
+```hcl
+enable_verification        = true
+verification_delay_minutes = 30
+verification_table_name    = "scheduler-verification"
+verification_ttl_days      = 7
+```
+
 ## ASG 참고사항
 
 ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니다. 스케줄러가 태그를 생성하지 않습니다.
@@ -244,6 +261,10 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 - `tags` (기본값: `{}`)
 - `log_level` (기본값: `INFO`)
 - `notification_tag_keys` (기본값: `[]`)
+- `enable_verification` (기본값: `false`)
+- `verification_delay_minutes` (기본값: `30`)
+- `verification_table_name` (기본값: `""`, `<lambda_function_name>-verification` 사용)
+- `verification_ttl_days` (기본값: `7`)
 - `timezone` (기본값: `Asia/Seoul`)
 - `enable_ec2` (기본값: `true`)
 - `enable_rds` (기본값: `false`)
@@ -264,6 +285,8 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 - `lambda_role_arn`
 - `eventbridge_log_group_name`
 - `eventbridge_log_group_arn`
+- `verification_table_name`
+- `verification_table_arn`
 
 ## 대상 계정 IAM Role
 
@@ -350,7 +373,7 @@ ASG 스케줄링은 `Schedule_Asg_*` 태그가 반드시 있어야 동작합니�
 
 - Teams/Slack은 값이 비어 있으면 전송하지 않습니다.
 - Telegram은 `telegram_bot_token`과 `telegram_chat_id`가 모두 있어야 전송합니다.
-- 변경사항이 있을 때만 알림을 보냅니다.
+- 변경사항이 있거나 검증 결과가 있을 때 알림을 보냅니다.
 
 ## 참고
 

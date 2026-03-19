@@ -998,12 +998,6 @@ def _maybe_send_notifications(account, changes, verifications, now):
         logger.exception("Telegram notification failed account=%s region=%s", account_id, region)
 
 
-def _notification_payload(changes, verifications, verification_table):
-    if verification_table:
-        return [], verifications
-    return changes, verifications
-
-
 def _validate_account(account):
     for key in ("account_id", "region", "iam_role"):
         if not account.get(key):
@@ -1450,12 +1444,7 @@ def handler(event, context):
         if verification_table and changes:
             _record_verifications(verification_table, account, changes, settings, now)
 
-        notification_changes, notification_verifications = _notification_payload(
-            changes,
-            verifications,
-            verification_table,
-        )
-        _maybe_send_notifications(account, notification_changes, notification_verifications, now)
+        _maybe_send_notifications(account, changes, verifications, now)
         summary.append(
             {
                 "account": account.get("account_id"),

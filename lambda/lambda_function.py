@@ -2,6 +2,7 @@ import html
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 import boto3
@@ -16,6 +17,30 @@ except Exception:  # pragma: no cover - best effort fallback
 logger = logging.getLogger()
 if not logger.handlers:
     logging.basicConfig()
+
+MINUTES_PER_DAY = 24 * 60
+MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY
+WEEKDAY_TOKENS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_INDEX = {token: idx for idx, token in enumerate(WEEKDAY_TOKENS)}
+WEEKDAY_ALIASES = {
+    "mon": "mon",
+    "monday": "mon",
+    "tue": "tue",
+    "tues": "tue",
+    "tuesday": "tue",
+    "wed": "wed",
+    "wednesday": "wed",
+    "thu": "thu",
+    "thur": "thu",
+    "thurs": "thu",
+    "thursday": "thu",
+    "fri": "fri",
+    "friday": "fri",
+    "sat": "sat",
+    "saturday": "sat",
+    "sun": "sun",
+    "sunday": "sun",
+}
 
 
 def _load_accounts():
@@ -96,9 +121,7 @@ def _load_settings():
         "enable_asg": _env_bool("ENABLE_ASG", False),
         "tag_schedule_key": _normalize_tag_key(os.environ.get("TAG_SCHEDULE_KEY"), "Schedule"),
         "tag_schedule_value": schedule_value,
-        "tag_start_key": _normalize_tag_key(os.environ.get("TAG_START_KEY"), "Schedule_Start"),
-        "tag_stop_key": _normalize_tag_key(os.environ.get("TAG_STOP_KEY"), "Schedule_Stop"),
-        "tag_weekday_key": _normalize_tag_key(os.environ.get("TAG_WEEKDAY_KEY"), "Schedule_Weekend"),
+        "tag_window_key": _normalize_tag_key(os.environ.get("TAG_WINDOW_KEY"), "Schedule_Windows"),
         "tag_asg_min_key": _normalize_tag_key(os.environ.get("TAG_ASG_MIN_KEY"), "Schedule_Asg_Min"),
         "tag_asg_max_key": _normalize_tag_key(os.environ.get("TAG_ASG_MAX_KEY"), "Schedule_Asg_Max"),
         "tag_asg_desired_key": _normalize_tag_key(
@@ -145,14 +168,6 @@ def _parse_time(value):
     return hour * 60 + minute
 
 
-def _should_run(now_minutes, start_minutes, stop_minutes):
-    if start_minutes == stop_minutes:
-        return False
-    if start_minutes < stop_minutes:
-        return start_minutes <= now_minutes < stop_minutes
-    return now_minutes >= start_minutes or now_minutes < stop_minutes
-
-
 def _tag_value_match(actual, expected):
     if actual is None:
         return False
@@ -164,19 +179,63 @@ def _tag_value_match(actual, expected):
     return actual.strip().lower() == expected.lower()
 
 
-def _parse_weekdays(value):
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    parts = [p.strip().lower() for p in text.split(",") if p.strip()]
-    return set(parts) if parts else None
-
-
 def _weekday_token(now):
     # Mon, Tue, Wed, Thu, Fri, Sat, Sun
     return now.strftime("%a").lower()
+
+
+def _normalize_weekday_token(value):
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    return WEEKDAY_ALIASES.get(text)
+
+
+def _weekday_position(token, minutes):
+    index = WEEKDAY_INDEX.get(token)
+    if index is None:
+        raise ValueError(f"Invalid weekday token: {token}")
+    return index * MINUTES_PER_DAY + minutes
+
+
+def _parse_schedule_window(value):
+    parts = str(value).split()
+    if len(parts) != 4:
+        raise ValueError(f"Invalid schedule window: {value}")
+
+    start_day = _normalize_weekday_token(parts[0])
+    end_day = _normalize_weekday_token(parts[2])
+    if not start_day or not end_day:
+        raise ValueError(f"Invalid schedule window day: {value}")
+
+    start_minutes = _parse_time(parts[1])
+    end_minutes = _parse_time(parts[3])
+    start_position = _weekday_position(start_day, start_minutes)
+    end_position = _weekday_position(end_day, end_minutes)
+
+    if start_position == end_position:
+        raise ValueError(f"Zero-length schedule window: {value}")
+    if end_position <= start_position:
+        end_position += MINUTES_PER_WEEK
+
+    return {"start": start_position, "end": end_position}
+
+
+def _parse_schedule_windows(value):
+    entries = [part.strip() for part in re.split(r"[;\r\n]+", str(value)) if part.strip()]
+    if not entries:
+        raise ValueError("Schedule windows must not be empty")
+    return [_parse_schedule_window(entry) for entry in entries]
+
+
+def _evaluate_schedule_windows(value, now_minutes, now_token):
+    now_position = _weekday_position(now_token, now_minutes)
+    for window in _parse_schedule_windows(value):
+        if window["start"] <= now_position < window["end"]:
+            return True
+        if window["start"] <= now_position + MINUTES_PER_WEEK < window["end"]:
+            return True
+    return False
 
 
 def _tags_to_dict(tags):
@@ -227,25 +286,14 @@ def _evaluate_schedule(tags, config, now_minutes, now_token):
     if not _tag_value_match(tags.get(config["schedule_key"]), config["schedule_value"]):
         return None
 
-    schedule_weekend = _parse_weekdays(tags.get(config["weekday_key"]))
-    if not schedule_weekend:
-        return None
+    window_value = tags.get(config["window_key"])
+    if window_value is not None and str(window_value).strip():
+        try:
+            return _evaluate_schedule_windows(window_value, now_minutes, now_token)
+        except ValueError:
+            return None
 
-    if now_token not in schedule_weekend:
-        return None
-
-    start_value = tags.get(config["start_key"])
-    stop_value = tags.get(config["stop_key"])
-    if start_value is None or stop_value is None:
-        return None
-
-    try:
-        start_minutes = _parse_time(start_value)
-        stop_minutes = _parse_time(stop_value)
-    except ValueError:
-        return None
-
-    return _should_run(now_minutes, start_minutes, stop_minutes)
+    return None
 
 
 def _assume_role(session, account_id, role_value):
@@ -1216,9 +1264,7 @@ def handler(event, context):
     tag_config = {
         "schedule_key": settings["tag_schedule_key"],
         "schedule_value": settings["tag_schedule_value"],
-        "start_key": settings["tag_start_key"],
-        "stop_key": settings["tag_stop_key"],
-        "weekday_key": settings["tag_weekday_key"],
+        "window_key": settings["tag_window_key"],
     }
     notify_tag_keys = settings["notification_tag_keys"]
     asg_config = {

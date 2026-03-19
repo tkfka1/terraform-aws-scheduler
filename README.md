@@ -1,133 +1,130 @@
 # terraform-aws-scheduler
 
-EC2/RDS/ASG scheduler module using Lambda + EventBridge. It runs on an EventBridge schedule (default: every 5 minutes) and starts/stops resources based on tag-driven windows in a configurable timezone (default: Asia/Seoul).
+EC2, RDS, and Auto Scaling Group scheduler module built with Lambda + EventBridge.
+The Lambda runs on an EventBridge schedule and starts, stops, or scales resources based on tag-defined time windows in a configurable timezone.
 
 Repository: https://github.com/tkfka1/terraform-aws-scheduler
 
-## Features
+## What It Does
 
-- EventBridge schedule (rate/cron)
-- Tag-driven start/stop with wrap-around midnight logic
-- Cross-account assume role with notifications (Teams/Slack/Telegram)
-- Idempotent: no action if already in desired state
-- Optional RDS instance/cluster scheduling
-- Optional Auto Scaling Group scheduling (EKS self-managed)
-- Optional EventBridge logs to CloudWatch Logs
-- Optional extra tag values in notifications
-- Optional delayed verification of start/stop/scale actions (DynamoDB)
+- Runs on an EventBridge `rate(...)` or `cron(...)` schedule
+- Evaluates resource tags in a configurable timezone, default `Asia/Seoul`
+- Supports EC2, RDS DB instances, RDS clusters, and Auto Scaling Groups
+- Uses cross-account `AssumeRole` for target accounts
+- Sends optional Teams, Slack, or Telegram notifications
+- Supports optional delayed verification with DynamoDB
+- Avoids duplicate actions when a resource is already in the desired state
 
-## Targets
+## Quick Start
 
-- EC2 instances (EKS self-managed worker nodes are EC2)
-- RDS DB instances and clusters
-- Auto Scaling Groups (EKS self-managed)
+1. Deploy the module in the scheduler account.
+2. Add the scheduler trust policy to the target account role.
+3. Tag target resources with `Schedule = True` and `Schedule_Windows = ...`.
+4. Wait for the EventBridge rule to invoke the Lambda on the next tick.
 
-If EKS self-managed nodes are in Auto Scaling Groups, stopping individual instances may be replaced by the ASG. In that case, schedule at the ASG level or disable replacement.
+## Schedule Tag Model
 
-## Scheduling Logic
+The scheduler uses two tags for normal resources:
 
-- `start < stop` -> `start <= now < stop`
-- `start > stop` (crosses midnight) -> `now >= start` OR `now < stop`
-- `start == stop` -> skip
-
-Timezone is configurable (default: `Asia/Seoul`). If the timezone cannot be loaded, the function exits without doing anything.
-
-## Schedule Tags (EC2)
-
-Example (EC2 instance tags):
-
-```
+```text
 Schedule = True
-Schedule_Start = 10
-Schedule_Stop = 12
-Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Schedule_Windows = Mon 09:00 Mon 18:00
+```
+
+Rules:
+
+- `Schedule` must match the configured enable tag key/value.
+- `Schedule_Windows` is required. Missing or invalid values are ignored.
+- Each window entry is `StartDay StartTime EndDay EndTime`.
+- Multiple windows are separated by `;` or line breaks.
+- Day names: recommended `Mon Tue Wed Thu Fri Sat Sun`. Full names like `Monday` are also accepted.
+- Time format: `HH` or `HH:MM`.
+- Start is inclusive, end is exclusive.
+- Always write the real end day. For Friday 07:00 to Saturday 01:00, write `Fri 07:00 Sat 01:00`.
+- `timezone` controls schedule evaluation. It does not depend on the Lambda host timezone.
+
+Recommended custom key variables:
+
+- `tag_schedule_key`
+- `tag_schedule_value`
+- `tag_window_key`
+
+## Schedule_Windows Examples
+
+Same-day window:
+
+```text
+Schedule = True
+Schedule_Windows = Mon 10:00 Mon 12:00
+```
+
+Overnight window:
+
+```text
+Schedule = True
+Schedule_Windows = Mon 22:00 Tue 02:00
+```
+
+Friday morning to Saturday early morning:
+
+```text
+Schedule = True
+Schedule_Windows = Fri 07:00 Sat 01:00
+```
+
+Multiple windows on the same day:
+
+```text
+Schedule = True
+Schedule_Windows = Mon 09:00 Mon 12:00; Mon 13:00 Mon 18:00
+```
+
+Business week:
+
+```text
+Schedule = True
+Schedule_Windows = Mon 09:00 Mon 18:00; Tue 09:00 Tue 18:00; Wed 09:00 Wed 18:00; Thu 09:00 Thu 18:00; Fri 09:00 Fri 18:00
+```
+
+Weekend only:
+
+```text
+Schedule = True
+Schedule_Windows = Sat 10:00 Sat 16:00; Sun 10:00 Sun 16:00
+```
+
+## Resource Tag Examples
+
+EC2:
+
+```text
+Schedule = True
+Schedule_Windows = Mon 09:00 Mon 18:00; Tue 09:00 Tue 18:00
 Name = web-01
 ```
 
-## Schedule Tags (RDS)
+RDS instance or cluster:
 
-Example (DB instance or cluster tags):
-
-```
+```text
 Schedule = True
-Schedule_Start = 09:00
-Schedule_Stop = 18:00
-Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Schedule_Windows = Mon 08:30 Mon 19:00; Tue 08:30 Tue 19:00
 Name = orders-db
 ```
 
-## Schedule Tags (ASG)
+Auto Scaling Group:
 
-Example (Auto Scaling Group tags):
-
-```
+```text
 Schedule = True
-Schedule_Start = 08
-Schedule_Stop = 20
-Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
+Schedule_Windows = Mon 08:00 Mon 20:00; Tue 08:00 Tue 20:00
 Schedule_Asg_Min = 1
 Schedule_Asg_Max = 3
 Schedule_Asg_Desired = 2
 Name = eks-workers
 ```
 
-Tag keys/values can be customized via module variables.
+## Terraform Usage
 
-This module does not create tags. Apply tags on EC2/RDS/ASG with your own Terraform or the console.
-You can include extra tag values in notifications with `notification_tag_keys` (e.g., `["Name"]`).
-
-## Schedule Tag Patterns
-
-Weekdays only (Mon-Fri, 09:00-18:00):
-
-```
-Schedule = True
-Schedule_Start = 09:00
-Schedule_Stop = 18:00
-Schedule_Weekend = Mon,Tue,Wed,Thu,Fri
-```
-
-Weekend only (Sat-Sun, 10-16):
-
-```
-Schedule = True
-Schedule_Start = 10
-Schedule_Stop = 16
-Schedule_Weekend = Sat,Sun
-```
-
-Specific weekdays only (Mon/Wed/Fri, 10-14):
-
-```
-Schedule = True
-Schedule_Start = 10
-Schedule_Stop = 14
-Schedule_Weekend = Mon,Wed,Fri
-```
-
-Overnight (crosses midnight, 22:00-02:00):
-
-```
-Schedule = True
-Schedule_Start = 22:00
-Schedule_Stop = 02:00
-Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun
-```
-
-Lunch break exclusion:
-
-Single tag set cannot express two windows (e.g., 09:00-12:00 and 13:00-18:00). Use custom logic or split the schedule across resources.
-
-Skip (start == stop):
-
-```
-Schedule = True
-Schedule_Start = 12
-Schedule_Stop = 12
-Schedule_Weekend = Mon,Tue,Wed,Thu,Fri,Sat,Sun
-```
-
-## Usage (Minimal)
+Minimal:
 
 ```hcl
 module "scheduler" {
@@ -146,7 +143,7 @@ module "scheduler" {
 }
 ```
 
-## Usage (Full)
+More complete:
 
 ```hcl
 module "scheduler" {
@@ -169,130 +166,64 @@ module "scheduler" {
   lambda_role_name       = "ec2-scheduler-lambda"
   lambda_memory_size     = 256
   lambda_timeout_seconds = 300
-  log_retention_in_days  = 30
-  event_rule_name        = "ec2-scheduler-hourly"
-  schedule_expression    = "rate(5 minutes)"
-  log_level              = "INFO"
-  notification_tag_keys  = ["Name"]
-  enable_verification           = true
-  verification_delay_minutes    = 30
-  verification_table_name       = "scheduler-verification"
-  verification_ttl_days         = 7
-  enable_eventbridge_logging       = true
-  eventbridge_log_retention_in_days = 30
 
-  tags = {
-    Service = "scheduler"
-    Owner   = "platform"
-  }
+  event_rule_name     = "ec2-scheduler-hourly"
+  schedule_expression = "rate(5 minutes)"
+  timezone            = "Asia/Seoul"
+  log_level           = "INFO"
 
-  timezone   = "Asia/Seoul"
   enable_ec2 = true
   enable_rds = true
   enable_asg = true
 
   tag_schedule_key   = "Schedule"
   tag_schedule_value = "True"
-  tag_start_key      = "Schedule_Start"
-  tag_stop_key       = "Schedule_Stop"
-  tag_weekday_key    = "Schedule_Weekend"
-  tag_asg_min_key     = "Schedule_Asg_Min"
-  tag_asg_max_key     = "Schedule_Asg_Max"
+  tag_window_key     = "Schedule_Windows"
+  tag_asg_min_key    = "Schedule_Asg_Min"
+  tag_asg_max_key    = "Schedule_Asg_Max"
   tag_asg_desired_key = "Schedule_Asg_Desired"
+
+  notification_tag_keys = ["Name"]
+
+  enable_verification        = true
+  verification_delay_minutes = 30
+  verification_table_name    = "scheduler-verification"
+  verification_ttl_days      = 7
+
+  enable_eventbridge_logging        = true
+  eventbridge_log_group_name        = "/aws/events/ec2-scheduler-hourly"
+  eventbridge_log_retention_in_days = 30
+
+  tags = {
+    Service = "scheduler"
+    Owner   = "platform"
+  }
 }
 ```
 
-You can also consume this module from GitHub:
+## Account Object
 
-```hcl
-module "scheduler" {
-  source = "git::https://github.com/tkfka1/terraform-aws-scheduler.git?ref=v1.0.0"
-  # ... variables ...
-}
-```
+Each entry in `accounts` supports:
 
-## EventBridge Logs (Optional)
-
-Enable CloudWatch Logs target for the EventBridge rule:
-
-```hcl
-enable_eventbridge_logging       = true
-eventbridge_log_group_name       = "/aws/events/ec2-scheduler-hourly"
-eventbridge_log_retention_in_days = 30
-```
-
-## Verification (Optional)
-
-Record start/stop/scale actions in DynamoDB and verify after a delay. The scheduler reports:
-`✅ 완료`, `⏳ 진행`, or `❌ 스케줄링 오류`.
-
-```hcl
-enable_verification        = true
-verification_delay_minutes = 30
-verification_table_name    = "scheduler-verification"
-verification_ttl_days      = 7
-```
-
-## Auto Scaling Group Notes
-
-ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG. The scheduler reads those tags to restore capacity.
-
-## Inputs
-
-- `accounts` (required): list of account objects
-  - `account_id` (required)
-  - `region` (required)
-  - `iam_role` (required, name or ARN)
-  - `teams_webhook` (optional)
-  - `slack_webhook` (optional)
-  - `telegram_bot_token` (optional)
-  - `telegram_chat_id` (optional)
-  - `description` (optional)
-- `lambda_function_name` (default: `ec2-scheduler`)
-- `lambda_role_name` (default: `ec2-scheduler-lambda`)
-- `lambda_memory_size` (default: `256`)
-- `lambda_timeout_seconds` (default: `300`)
-- `log_retention_in_days` (default: `30`)
-- `event_rule_name` (default: `ec2-scheduler-hourly`)
-- `schedule_expression` (default: `rate(5 minutes)`)
-- `enable_eventbridge_logging` (default: `false`)
-- `eventbridge_log_group_name` (default: `""`, uses `/aws/events/<event_rule_name>`)
-- `eventbridge_log_retention_in_days` (default: `30`)
-- `tags` (default: `{}`)
-- `log_level` (default: `INFO`)
-- `notification_tag_keys` (default: `[]`)
-- `enable_verification` (default: `false`)
-- `verification_delay_minutes` (default: `30`)
-- `verification_table_name` (default: `""`, uses `<lambda_function_name>-verification`)
-- `verification_ttl_days` (default: `7`)
-- `timezone` (default: `Asia/Seoul`)
-- `enable_ec2` (default: `true`)
-- `enable_rds` (default: `false`)
-- `enable_asg` (default: `false`)
-- `tag_schedule_key` (default: `Schedule`)
-- `tag_schedule_value` (default: `True`)
-- `tag_start_key` (default: `Schedule_Start`)
-- `tag_stop_key` (default: `Schedule_Stop`)
-- `tag_weekday_key` (default: `Schedule_Weekend`)
-- `tag_asg_min_key` (default: `Schedule_Asg_Min`)
-- `tag_asg_max_key` (default: `Schedule_Asg_Max`)
-- `tag_asg_desired_key` (default: `Schedule_Asg_Desired`)
-
-## Outputs
-
-- `lambda_function_name`
-- `event_rule_arn`
-- `lambda_role_arn`
-- `eventbridge_log_group_name`
-- `eventbridge_log_group_arn`
-- `verification_table_name`
-- `verification_table_arn`
+- `account_id` required
+- `region` required
+- `iam_role` required, role name or full ARN
+- `teams_webhook` optional
+- `slack_webhook` optional
+- `telegram_bot_token` optional
+- `telegram_chat_id` optional
+- `description` optional
 
 ## Target Account IAM Role
 
-The scheduler Lambda assumes the `iam_role` in each target account. You can pass a role name or an ARN; a name is expanded to `arn:aws:iam::<account_id>:role/<iam_role>`.
+The scheduler Lambda assumes `iam_role` in each target account.
+If `iam_role` is a name, the module expands it to:
 
-Add a trust policy in the target account role to allow the scheduler Lambda role to assume it. Use the module output `lambda_role_arn` as the principal:
+```text
+arn:aws:iam::<account_id>:role/<iam_role>
+```
+
+Trust policy for the target account role:
 
 ```json
 {
@@ -309,7 +240,7 @@ Add a trust policy in the target account role to allow the scheduler Lambda role
 }
 ```
 
-The `iam_role` in each account must allow EC2 actions:
+Base EC2 permissions:
 
 ```json
 {
@@ -328,7 +259,7 @@ The `iam_role` in each account must allow EC2 actions:
 }
 ```
 
-If `enable_rds = true`, add RDS permissions:
+Additional RDS permissions when `enable_rds = true`:
 
 ```json
 {
@@ -351,7 +282,7 @@ If `enable_rds = true`, add RDS permissions:
 }
 ```
 
-If `enable_asg = true`, add ASG permissions:
+Additional ASG permissions when `enable_asg = true`:
 
 ```json
 {
@@ -369,17 +300,77 @@ If `enable_asg = true`, add ASG permissions:
 }
 ```
 
-## Notifications
+## Optional Features
 
-- Teams/Slack can be empty to skip that channel.
-- Telegram only sends when both `telegram_bot_token` and `telegram_chat_id` are set.
-- Notifications are sent when changes occur or verification results are available.
+Notifications:
+
+- Teams is skipped when `teams_webhook` is empty.
+- Slack is skipped when `slack_webhook` is empty.
+- Telegram sends only when both `telegram_bot_token` and `telegram_chat_id` are set.
+- Notifications are sent only when changes occur or verification results exist.
+
+Verification:
+
+```hcl
+enable_verification        = true
+verification_delay_minutes = 30
+verification_table_name    = "scheduler-verification"
+verification_ttl_days      = 7
+```
+
+EventBridge logs:
+
+```hcl
+enable_eventbridge_logging        = true
+eventbridge_log_group_name        = "/aws/events/ec2-scheduler-hourly"
+eventbridge_log_retention_in_days = 30
+```
+
+## Inputs
+
+- `accounts` required
+- `lambda_function_name` default `ec2-scheduler`
+- `lambda_role_name` default `ec2-scheduler-lambda`
+- `lambda_memory_size` default `256`
+- `lambda_timeout_seconds` default `300`
+- `log_retention_in_days` default `30`
+- `event_rule_name` default `ec2-scheduler-hourly`
+- `schedule_expression` default `rate(5 minutes)`
+- `enable_eventbridge_logging` default `false`
+- `eventbridge_log_group_name` default `""`, which becomes `/aws/events/<event_rule_name>`
+- `eventbridge_log_retention_in_days` default `30`
+- `tags` default `{}`
+- `log_level` default `INFO`
+- `notification_tag_keys` default `[]`
+- `enable_verification` default `false`
+- `verification_delay_minutes` default `30`
+- `verification_table_name` default `""`, which becomes `<lambda_function_name>-verification`
+- `verification_ttl_days` default `7`
+- `timezone` default `Asia/Seoul`
+- `enable_ec2` default `true`
+- `enable_rds` default `false`
+- `enable_asg` default `false`
+- `tag_schedule_key` default `Schedule`
+- `tag_schedule_value` default `True`
+- `tag_window_key` default `Schedule_Windows`
+- `tag_asg_min_key` default `Schedule_Asg_Min`
+- `tag_asg_max_key` default `Schedule_Asg_Max`
+- `tag_asg_desired_key` default `Schedule_Asg_Desired`
+
+## Outputs
+
+- `lambda_function_name`
+- `event_rule_arn`
+- `lambda_role_arn`
+- `eventbridge_log_group_name`
+- `eventbridge_log_group_arn`
+- `verification_table_name`
+- `verification_table_arn`
 
 ## Notes
 
-- Lambda uses its instance profile to assume roles.
-- This module does not create tags; apply schedule tags on EC2/RDS/ASG separately.
-- If `Schedule_Weekend` tag is missing, the instance is ignored.
-- If a schedule tag is invalid, the instance is ignored.
-- RDS uses the same tags on DB instances or clusters (Aurora uses cluster tags).
-- ASG scheduling requires `Schedule_Asg_*` tags to exist; the scheduler does not create tags.
+- This module does not create schedule tags on EC2, RDS, or ASG resources.
+- If `Schedule_Windows` is missing or invalid, the resource is ignored.
+- RDS uses the same tags on DB instances and clusters. Aurora uses cluster tags.
+- ASG scheduling requires `Schedule_Asg_*` tags to exist on the ASG.
+- If EKS self-managed nodes are managed by an ASG, schedule the ASG rather than individual instances.

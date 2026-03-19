@@ -151,22 +151,10 @@ variable "tag_schedule_value" {
   default     = "True"
 }
 
-variable "tag_start_key" {
-  description = "Tag key for schedule start time."
+variable "tag_window_key" {
+  description = "Tag key for explicit schedule windows. Format: `Mon 07:00 Tue 01:00; Tue 09:00 Tue 18:00`."
   type        = string
-  default     = "Schedule_Start"
-}
-
-variable "tag_stop_key" {
-  description = "Tag key for schedule stop time."
-  type        = string
-  default     = "Schedule_Stop"
-}
-
-variable "tag_weekday_key" {
-  description = "Tag key for allowed weekdays."
-  type        = string
-  default     = "Schedule_Weekend"
+  default     = "Schedule_Windows"
 }
 
 variable "tag_asg_min_key" {

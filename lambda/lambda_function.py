@@ -316,7 +316,7 @@ def _send_teams(webhook, message):
     if not webhook:
         return
     payload = json.dumps({"text": message}).encode("utf-8")
-    _post_json(webhook, payload)
+    _post_json(webhook, payload, "teams")
 
 
 def _send_slack(webhook, payload):
@@ -327,7 +327,18 @@ def _send_slack(webhook, payload):
     else:
         body = payload
     data = json.dumps(body).encode("utf-8")
-    _post_json(webhook, data)
+    _post_json(webhook, data, "slack")
+
+
+def _telegram_plain_text(message):
+    text = re.sub(r"</?pre>", "", str(message))
+    text = re.sub(r"</?b>", "", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = text.strip()
+    if len(text) > 3900:
+        text = f"{text[:3890]}\n...[truncated]"
+    return text
 
 
 def _send_telegram(token, chat_id, message, parse_mode=None):
@@ -338,15 +349,42 @@ def _send_telegram(token, chat_id, message, parse_mode=None):
     if parse_mode:
         payload["parse_mode"] = parse_mode
     data = json.dumps(payload).encode("utf-8")
-    _post_json(url, data)
+    try:
+        _post_json(url, data, "telegram")
+    except RuntimeError:
+        if not parse_mode:
+            raise
+
+        logger.warning(
+            "Telegram notification failed with parse_mode=%s; retrying plain text chat_id=%s",
+            parse_mode,
+            chat_id,
+            exc_info=True,
+        )
+        fallback_payload = {"chat_id": chat_id, "text": _telegram_plain_text(message)}
+        fallback_data = json.dumps(fallback_payload).encode("utf-8")
+        _post_json(url, fallback_data, "telegram")
 
 
-def _post_json(url, payload):
-    from urllib import request
+def _post_json(url, payload, target):
+    from urllib import error, request
 
     req = request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    with request.urlopen(req, timeout=10):
-        return
+    try:
+        with request.urlopen(req, timeout=10):
+            return
+    except error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = ""
+        message = f"{target} request failed status={exc.code}"
+        if body:
+            message += f" body={body[:500]}"
+        raise RuntimeError(message) from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"{target} request failed reason={exc.reason}") from exc
 
 
 def _format_action_label(action):
@@ -727,8 +765,8 @@ def _build_text_message(account, changes, verifications, now):
             account_parts.append(f"Region: {region}")
         lines.append(" | ".join(account_parts))
 
-    lines.append(f"Changes ({len(changes)}):")
     if changes:
+        lines.append(f"Changes ({len(changes)}):")
         headers = ["Action", "Type", "Id", "Tags/Details"]
         rows = []
         for change in changes:
@@ -786,8 +824,8 @@ def _build_telegram_message(account, changes, verifications, now):
             account_parts.append(f"Region: {_escape_html(region)}")
         lines.append(" | ".join(account_parts))
 
-    lines.append(f"Changes ({len(changes)}):")
     if changes:
+        lines.append(f"Changes ({len(changes)}):")
         headers = ["Action", "Type", "Id", "Tags/Details"]
         rows = []
         for change in changes:
@@ -849,38 +887,40 @@ def _build_slack_payload(account, changes, verifications, now):
         {"type": "divider"},
     ]
 
-    blocks.append(
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Changes ({len(changes)}):*"}}
-    )
-    if len(changes) > 20:
-        lines = []
-        for change in changes:
-            extra = _format_change_extra(change)
-            resource_id = change.get("resource_id") or "-"
-            line = (
-                f"- {_format_action_label(change.get('action'))} "
-                f"{_format_resource_label(change.get('resource_type'))} `{resource_id}`"
-            )
-            if extra:
-                line += f" - {extra}"
-            lines.append(line)
-        if lines:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-    else:
-        for idx, change in enumerate(changes):
-            extra = _format_change_extra(change)
-            fields = [
-                {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
-                {"type": "mrkdwn", "text": f"*Type*\n{_format_resource_label(change.get('resource_type'))}"},
-                {"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"},
-                {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
-            ]
-            blocks.append({"type": "section", "fields": fields})
-            if idx != len(changes) - 1:
-                blocks.append({"type": "divider"})
+    if changes:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Changes ({len(changes)}):*"}}
+        )
+        if len(changes) > 20:
+            lines = []
+            for change in changes:
+                extra = _format_change_extra(change)
+                resource_id = change.get("resource_id") or "-"
+                line = (
+                    f"- {_format_action_label(change.get('action'))} "
+                    f"{_format_resource_label(change.get('resource_type'))} `{resource_id}`"
+                )
+                if extra:
+                    line += f" - {extra}"
+                lines.append(line)
+            if lines:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        else:
+            for idx, change in enumerate(changes):
+                extra = _format_change_extra(change)
+                fields = [
+                    {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
+                    {"type": "mrkdwn", "text": f"*Type*\n{_format_resource_label(change.get('resource_type'))}"},
+                    {"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"},
+                    {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
+                ]
+                blocks.append({"type": "section", "fields": fields})
+                if idx != len(changes) - 1:
+                    blocks.append({"type": "divider"})
 
     if verifications:
-        blocks.append({"type": "divider"})
+        if changes:
+            blocks.append({"type": "divider"})
         blocks.append(
             {
                 "type": "section",
@@ -934,15 +974,34 @@ def _maybe_send_notifications(account, changes, verifications, now):
     text_message = _build_text_message(account, changes, verifications, now)
     slack_payload = _build_slack_payload(account, changes, verifications, now)
     telegram_message = _build_telegram_message(account, changes, verifications, now)
+    account_id = account.get("account_id")
+    region = account.get("region")
 
-    _send_teams(account.get("teams_webhook"), text_message)
-    _send_slack(account.get("slack_webhook"), slack_payload)
-    _send_telegram(
-        account.get("telegram_bot_token"),
-        account.get("telegram_chat_id"),
-        telegram_message,
-        parse_mode="HTML",
-    )
+    try:
+        _send_teams(account.get("teams_webhook"), text_message)
+    except Exception:
+        logger.exception("Teams notification failed account=%s region=%s", account_id, region)
+
+    try:
+        _send_slack(account.get("slack_webhook"), slack_payload)
+    except Exception:
+        logger.exception("Slack notification failed account=%s region=%s", account_id, region)
+
+    try:
+        _send_telegram(
+            account.get("telegram_bot_token"),
+            account.get("telegram_chat_id"),
+            telegram_message,
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("Telegram notification failed account=%s region=%s", account_id, region)
+
+
+def _notification_payload(changes, verifications, verification_table):
+    if verification_table:
+        return [], verifications
+    return changes, verifications
 
 
 def _validate_account(account):
@@ -1391,7 +1450,12 @@ def handler(event, context):
         if verification_table and changes:
             _record_verifications(verification_table, account, changes, settings, now)
 
-        _maybe_send_notifications(account, changes, verifications, now)
+        notification_changes, notification_verifications = _notification_payload(
+            changes,
+            verifications,
+            verification_table,
+        )
+        _maybe_send_notifications(account, notification_changes, notification_verifications, now)
         summary.append(
             {
                 "account": account.get("account_id"),

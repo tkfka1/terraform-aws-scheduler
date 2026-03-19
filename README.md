@@ -307,6 +307,7 @@ Notifications:
 - Teams is skipped when `teams_webhook` is empty.
 - Slack is skipped when `slack_webhook` is empty.
 - Telegram sends only when both `telegram_bot_token` and `telegram_chat_id` are set.
+- When verification is enabled, immediate change notifications are suppressed and only verification results are sent.
 - Notifications are sent only when changes occur or verification results exist.
 
 Verification:

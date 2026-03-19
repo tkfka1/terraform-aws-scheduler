@@ -311,6 +311,7 @@ Notifications:
 - Generic webhook is skipped when `generic_webhook` is empty.
 - Telegram sends only when both `telegram_bot_token` and `telegram_chat_id` are set.
 - `notification_tag_keys` supports the reserved key `Id`. If `Id` is missing, resource IDs are omitted from outgoing notifications.
+- Each configured notification tag key is rendered as its own column or field, using the tag key itself as the label.
 - Notifications are sent only when changes occur or verification results exist.
 
 Generic webhook payload:

@@ -281,6 +281,19 @@ def _extract_notification_tags(tags, keys):
     return ", ".join(pairs)
 
 
+def _extract_notification_tag_values(tags, keys):
+    values = {}
+    for key in keys or []:
+        value = tags.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        values[key] = text
+    return values
+
+
 def _build_change(
     action,
     resource_type,
@@ -295,6 +308,7 @@ def _build_change(
         "action": action,
         "resource_type": resource_type,
         "resource_id": resource_id,
+        "notification_tags": _extract_notification_tag_values(tags, notify_tag_keys),
         "tag_summary": _extract_notification_tags(tags, notify_tag_keys),
     }
     if details:
@@ -486,12 +500,15 @@ def _render_table(headers, rows):
     return lines
 
 
-def _change_tags_text(change):
-    return change.get("tag_summary") or ""
-
-
 def _change_details_text(change):
     return change.get("details") or ""
+
+
+def _change_notification_tags(change, notify_tag_keys):
+    stored = change.get("notification_tags")
+    if isinstance(stored, dict):
+        return {key: str(stored.get(key) or "") for key in notify_tag_keys}
+    return {key: "" for key in notify_tag_keys}
 
 
 def _verification_enabled(settings):
@@ -568,6 +585,7 @@ def _build_verification_item(account, change, settings, now):
         "verify_at": verify_at,
         "expires_at": expires_at,
         "expected_state": expected_state,
+        "notification_tags": change.get("notification_tags"),
         "tag_summary": change.get("tag_summary"),
         "details": change.get("details"),
         "desired_sizes": change.get("desired_sizes"),
@@ -613,6 +631,7 @@ def _build_verification_result(item, status, details=None):
         "action": item.get("action"),
         "resource_type": item.get("resource_type"),
         "resource_id": item.get("resource_id"),
+        "notification_tags": item.get("notification_tags"),
         "tag_summary": item.get("tag_summary"),
     }
     if details:
@@ -782,7 +801,7 @@ def _process_verifications(base_session, accounts, settings, now, table):
     return results
 
 
-def _build_text_message(account, changes, verifications, now, include_resource_id):
+def _build_text_message(account, changes, verifications, now, include_resource_id, notify_tag_keys):
     changes = changes or []
     verifications = verifications or []
     header = f"[Scheduler] {account.get('description', account.get('account_id', 'account'))}"
@@ -802,7 +821,8 @@ def _build_text_message(account, changes, verifications, now, include_resource_i
         headers = ["Action", "Type"]
         if include_resource_id:
             headers.append("Id")
-        headers.extend(["Tags", "Details"])
+        headers.extend(notify_tag_keys)
+        headers.append("Details")
         rows = []
         for change in changes:
             row = [
@@ -811,7 +831,8 @@ def _build_text_message(account, changes, verifications, now, include_resource_i
             ]
             if include_resource_id:
                 row.append(change.get("resource_id") or "")
-            row.append(_change_tags_text(change))
+            tags = _change_notification_tags(change, notify_tag_keys)
+            row.extend(tags.get(key, "") for key in notify_tag_keys)
             row.append(_change_details_text(change))
             rows.append(row)
         lines.append("```")
@@ -823,7 +844,8 @@ def _build_text_message(account, changes, verifications, now, include_resource_i
         headers = ["Status", "Action", "Type"]
         if include_resource_id:
             headers.append("Id")
-        headers.extend(["Tags", "Details"])
+        headers.extend(notify_tag_keys)
+        headers.append("Details")
         rows = []
         for verification in verifications:
             row = [
@@ -833,7 +855,8 @@ def _build_text_message(account, changes, verifications, now, include_resource_i
             ]
             if include_resource_id:
                 row.append(verification.get("resource_id") or "")
-            row.append(_change_tags_text(verification))
+            tags = _change_notification_tags(verification, notify_tag_keys)
+            row.extend(tags.get(key, "") for key in notify_tag_keys)
             row.append(_change_details_text(verification))
             rows.append(row)
         lines.append("```")
@@ -846,7 +869,7 @@ def _escape_html(text):
     return html.escape(str(text), quote=False)
 
 
-def _build_telegram_message(account, changes, verifications, now, include_resource_id):
+def _build_telegram_message(account, changes, verifications, now, include_resource_id, notify_tag_keys):
     changes = changes or []
     verifications = verifications or []
     title = account.get("description") or account.get("account_id") or "account"
@@ -869,7 +892,8 @@ def _build_telegram_message(account, changes, verifications, now, include_resour
         headers = ["Action", "Type"]
         if include_resource_id:
             headers.append("Id")
-        headers.extend(["Tags", "Details"])
+        headers.extend(notify_tag_keys)
+        headers.append("Details")
         rows = []
         for change in changes:
             row = [
@@ -878,7 +902,8 @@ def _build_telegram_message(account, changes, verifications, now, include_resour
             ]
             if include_resource_id:
                 row.append(change.get("resource_id") or "")
-            row.append(_change_tags_text(change))
+            tags = _change_notification_tags(change, notify_tag_keys)
+            row.extend(tags.get(key, "") for key in notify_tag_keys)
             row.append(_change_details_text(change))
             rows.append(row)
         table_text = "\n".join(_render_table(headers, rows))
@@ -891,7 +916,8 @@ def _build_telegram_message(account, changes, verifications, now, include_resour
         headers = ["Status", "Action", "Type"]
         if include_resource_id:
             headers.append("Id")
-        headers.extend(["Tags", "Details"])
+        headers.extend(notify_tag_keys)
+        headers.append("Details")
         rows = []
         for verification in verifications:
             row = [
@@ -901,7 +927,8 @@ def _build_telegram_message(account, changes, verifications, now, include_resour
             ]
             if include_resource_id:
                 row.append(verification.get("resource_id") or "")
-            row.append(_change_tags_text(verification))
+            tags = _change_notification_tags(verification, notify_tag_keys)
+            row.extend(tags.get(key, "") for key in notify_tag_keys)
             row.append(_change_details_text(verification))
             rows.append(row)
         table_text = "\n".join(_render_table(headers, rows))
@@ -911,12 +938,19 @@ def _build_telegram_message(account, changes, verifications, now, include_resour
     return "\n".join(lines)
 
 
-def _build_slack_payload(account, changes, verifications, now, include_resource_id):
+def _build_slack_payload(account, changes, verifications, now, include_resource_id, notify_tag_keys):
     changes = changes or []
     verifications = verifications or []
     title = account.get("description") or account.get("account_id") or "account"
     time_text = now.strftime("%Y-%m-%d %H:%M %Z")
-    text_fallback = _build_text_message(account, changes, verifications, now, include_resource_id)
+    text_fallback = _build_text_message(
+        account,
+        changes,
+        verifications,
+        now,
+        include_resource_id,
+        notify_tag_keys,
+    )
 
     context_elements = [{"type": "mrkdwn", "text": f"*Time:* {time_text}"}]
     account_id = account.get("account_id")
@@ -942,7 +976,7 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
         if len(changes) > 20:
             lines = []
             for change in changes:
-                tags = _change_tags_text(change)
+                tag_values = _change_notification_tags(change, notify_tag_keys)
                 details = _change_details_text(change)
                 line = (
                     f"- {_format_action_label(change.get('action'))} "
@@ -950,8 +984,10 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
                 )
                 if include_resource_id:
                     line += f" `{change.get('resource_id') or '-'}`"
-                if tags:
-                    line += f"\n  Tags: {tags}"
+                for key in notify_tag_keys:
+                    value = tag_values.get(key) or ""
+                    if value:
+                        line += f"\n  {key}: {value}"
                 if details:
                     line += f"\n  Details: {details}"
                 lines.append(line)
@@ -959,7 +995,7 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         else:
             for idx, change in enumerate(changes):
-                tags = _change_tags_text(change)
+                tag_values = _change_notification_tags(change, notify_tag_keys)
                 details = _change_details_text(change)
                 fields = [
                     {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
@@ -967,7 +1003,8 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
                 ]
                 if include_resource_id:
                     fields.append({"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"})
-                fields.append({"type": "mrkdwn", "text": f"*Tags*\n{tags if tags else '-'}"})
+                for key in notify_tag_keys:
+                    fields.append({"type": "mrkdwn", "text": f"*{key}*\n{tag_values.get(key) or '-'}"})
                 fields.append({"type": "mrkdwn", "text": f"*Details*\n{details if details else '-'}"})
                 blocks.append({"type": "section", "fields": fields})
                 if idx != len(changes) - 1:
@@ -985,7 +1022,7 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
         if len(verifications) > 20:
             lines = []
             for verification in verifications:
-                tags = _change_tags_text(verification)
+                tag_values = _change_notification_tags(verification, notify_tag_keys)
                 details = _change_details_text(verification)
                 line = (
                     f"- {_format_status_label(verification.get('status'))} "
@@ -994,15 +1031,17 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
                 )
                 if include_resource_id:
                     line += f" `{verification.get('resource_id') or '-'}`"
-                if tags:
-                    line += f"\n  Tags: {tags}"
+                for key in notify_tag_keys:
+                    value = tag_values.get(key) or ""
+                    if value:
+                        line += f"\n  {key}: {value}"
                 if details:
                     line += f"\n  Details: {details}"
                 lines.append(line)
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         else:
             for idx, verification in enumerate(verifications):
-                tags = _change_tags_text(verification)
+                tag_values = _change_notification_tags(verification, notify_tag_keys)
                 details = _change_details_text(verification)
                 fields = [
                     {
@@ -1022,7 +1061,8 @@ def _build_slack_payload(account, changes, verifications, now, include_resource_
                     fields.append(
                         {"type": "mrkdwn", "text": f"*Id*\n`{verification.get('resource_id') or '-'}`"}
                     )
-                fields.append({"type": "mrkdwn", "text": f"*Tags*\n{tags if tags else '-'}"})
+                for key in notify_tag_keys:
+                    fields.append({"type": "mrkdwn", "text": f"*{key}*\n{tag_values.get(key) or '-'}"})
                 fields.append({"type": "mrkdwn", "text": f"*Details*\n{details if details else '-'}"})
                 blocks.append({"type": "section", "fields": fields})
                 if idx != len(verifications) - 1:
@@ -1056,18 +1096,33 @@ def _build_webhook_payload(account, changes, verifications, now, text_message, i
     }
 
 
-def _maybe_send_notifications(account, changes, verifications, now, include_resource_id):
+def _maybe_send_notifications(account, changes, verifications, now, include_resource_id, notify_tag_keys):
     if not changes and not verifications:
         return
 
-    text_message = _build_text_message(account, changes, verifications, now, include_resource_id)
-    slack_payload = _build_slack_payload(account, changes, verifications, now, include_resource_id)
+    text_message = _build_text_message(
+        account,
+        changes,
+        verifications,
+        now,
+        include_resource_id,
+        notify_tag_keys,
+    )
+    slack_payload = _build_slack_payload(
+        account,
+        changes,
+        verifications,
+        now,
+        include_resource_id,
+        notify_tag_keys,
+    )
     telegram_message = _build_telegram_message(
         account,
         changes,
         verifications,
         now,
         include_resource_id,
+        notify_tag_keys,
     )
     webhook_payload = _build_webhook_payload(
         account,
@@ -1554,7 +1609,14 @@ def handler(event, context):
         if verification_table and changes:
             _record_verifications(verification_table, account, changes, settings, now)
 
-        _maybe_send_notifications(account, changes, verifications, now, include_resource_id)
+        _maybe_send_notifications(
+            account,
+            changes,
+            verifications,
+            now,
+            include_resource_id,
+            notify_tag_keys,
+        )
         summary.append(
             {
                 "account": account.get("account_id"),

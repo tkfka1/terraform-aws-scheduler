@@ -6,6 +6,7 @@ variable "accounts" {
     iam_role            = string
     teams_webhook       = optional(string)
     slack_webhook       = optional(string)
+    generic_webhook     = optional(string)
     telegram_bot_token  = optional(string)
     telegram_chat_id    = optional(string)
     description         = optional(string)
@@ -86,7 +87,7 @@ variable "log_level" {
 }
 
 variable "notification_tag_keys" {
-  description = "Tag keys to include in notifications."
+  description = "Tag keys to include in notifications. Use reserved key `Id` to include resource IDs."
   type        = list(string)
   default     = []
 }

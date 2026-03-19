@@ -22,6 +22,7 @@ MINUTES_PER_DAY = 24 * 60
 MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY
 WEEKDAY_TOKENS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 WEEKDAY_INDEX = {token: idx for idx, token in enumerate(WEEKDAY_TOKENS)}
+RESOURCE_ID_NOTIFICATION_KEYS = {"id", "resource_id", "resourceid"}
 WEEKDAY_ALIASES = {
     "mon": "mon",
     "monday": "mon",
@@ -105,6 +106,29 @@ def _load_notification_tag_keys():
         return keys
 
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _normalize_notification_key(value):
+    return str(value).strip().lower()
+
+
+def _notification_include_resource_id(keys):
+    for key in keys or []:
+        if _normalize_notification_key(key) in RESOURCE_ID_NOTIFICATION_KEYS:
+            return True
+    return False
+
+
+def _notification_display_tag_keys(keys):
+    filtered = []
+    for key in keys or []:
+        text = str(key).strip()
+        if not text:
+            continue
+        if _normalize_notification_key(text) in RESOURCE_ID_NOTIFICATION_KEYS:
+            continue
+        filtered.append(text)
+    return filtered
 
 
 def _load_settings():
@@ -330,6 +354,13 @@ def _send_slack(webhook, payload):
     _post_json(webhook, data, "slack")
 
 
+def _send_generic_webhook(webhook, payload):
+    if not webhook:
+        return
+    data = json.dumps(payload).encode("utf-8")
+    _post_json(webhook, data, "generic_webhook")
+
+
 def _telegram_plain_text(message):
     text = re.sub(r"</?pre>", "", str(message))
     text = re.sub(r"</?b>", "", text)
@@ -455,11 +486,12 @@ def _render_table(headers, rows):
     return lines
 
 
-def _format_change_extra(change):
-    details = change.get("details") or ""
-    tags = change.get("tag_summary") or ""
-    parts = [part for part in (details, tags) if part]
-    return "; ".join(parts)
+def _change_tags_text(change):
+    return change.get("tag_summary") or ""
+
+
+def _change_details_text(change):
+    return change.get("details") or ""
 
 
 def _verification_enabled(settings):
@@ -750,7 +782,7 @@ def _process_verifications(base_session, accounts, settings, now, table):
     return results
 
 
-def _build_text_message(account, changes, verifications, now):
+def _build_text_message(account, changes, verifications, now, include_resource_id):
     changes = changes or []
     verifications = verifications or []
     header = f"[Scheduler] {account.get('description', account.get('account_id', 'account'))}"
@@ -767,35 +799,43 @@ def _build_text_message(account, changes, verifications, now):
 
     if changes:
         lines.append(f"Changes ({len(changes)}):")
-        headers = ["Action", "Type", "Id", "Tags/Details"]
+        headers = ["Action", "Type"]
+        if include_resource_id:
+            headers.append("Id")
+        headers.extend(["Tags", "Details"])
         rows = []
         for change in changes:
-            rows.append(
-                [
-                    _format_action_label(change.get("action")),
-                    _format_resource_label(change.get("resource_type")),
-                    change.get("resource_id") or "",
-                    _format_change_extra(change),
-                ]
-            )
+            row = [
+                _format_action_label(change.get("action")),
+                _format_resource_label(change.get("resource_type")),
+            ]
+            if include_resource_id:
+                row.append(change.get("resource_id") or "")
+            row.append(_change_tags_text(change))
+            row.append(_change_details_text(change))
+            rows.append(row)
         lines.append("```")
         lines.extend(_render_table(headers, rows))
         lines.append("```")
 
     if verifications:
         lines.append(f"Verification ({len(verifications)}):")
-        headers = ["Status", "Action", "Type", "Id", "Tags/Details"]
+        headers = ["Status", "Action", "Type"]
+        if include_resource_id:
+            headers.append("Id")
+        headers.extend(["Tags", "Details"])
         rows = []
         for verification in verifications:
-            rows.append(
-                [
-                    _format_status_label(verification.get("status")),
-                    _format_action_label(verification.get("action")),
-                    _format_resource_label(verification.get("resource_type")),
-                    verification.get("resource_id") or "",
-                    _format_change_extra(verification),
-                ]
-            )
+            row = [
+                _format_status_label(verification.get("status")),
+                _format_action_label(verification.get("action")),
+                _format_resource_label(verification.get("resource_type")),
+            ]
+            if include_resource_id:
+                row.append(verification.get("resource_id") or "")
+            row.append(_change_tags_text(verification))
+            row.append(_change_details_text(verification))
+            rows.append(row)
         lines.append("```")
         lines.extend(_render_table(headers, rows))
         lines.append("```")
@@ -806,7 +846,7 @@ def _escape_html(text):
     return html.escape(str(text), quote=False)
 
 
-def _build_telegram_message(account, changes, verifications, now):
+def _build_telegram_message(account, changes, verifications, now, include_resource_id):
     changes = changes or []
     verifications = verifications or []
     title = account.get("description") or account.get("account_id") or "account"
@@ -826,17 +866,21 @@ def _build_telegram_message(account, changes, verifications, now):
 
     if changes:
         lines.append(f"Changes ({len(changes)}):")
-        headers = ["Action", "Type", "Id", "Tags/Details"]
+        headers = ["Action", "Type"]
+        if include_resource_id:
+            headers.append("Id")
+        headers.extend(["Tags", "Details"])
         rows = []
         for change in changes:
-            rows.append(
-                [
-                    _format_action_label(change.get("action")),
-                    _format_resource_label(change.get("resource_type")),
-                    change.get("resource_id") or "",
-                    _format_change_extra(change),
-                ]
-            )
+            row = [
+                _format_action_label(change.get("action")),
+                _format_resource_label(change.get("resource_type")),
+            ]
+            if include_resource_id:
+                row.append(change.get("resource_id") or "")
+            row.append(_change_tags_text(change))
+            row.append(_change_details_text(change))
+            rows.append(row)
         table_text = "\n".join(_render_table(headers, rows))
         lines.append("<pre>")
         lines.append(_escape_html(table_text))
@@ -844,18 +888,22 @@ def _build_telegram_message(account, changes, verifications, now):
 
     if verifications:
         lines.append(f"Verification ({len(verifications)}):")
-        headers = ["Status", "Action", "Type", "Id", "Tags/Details"]
+        headers = ["Status", "Action", "Type"]
+        if include_resource_id:
+            headers.append("Id")
+        headers.extend(["Tags", "Details"])
         rows = []
         for verification in verifications:
-            rows.append(
-                [
-                    _format_status_label(verification.get("status")),
-                    _format_action_label(verification.get("action")),
-                    _format_resource_label(verification.get("resource_type")),
-                    verification.get("resource_id") or "",
-                    _format_change_extra(verification),
-                ]
-            )
+            row = [
+                _format_status_label(verification.get("status")),
+                _format_action_label(verification.get("action")),
+                _format_resource_label(verification.get("resource_type")),
+            ]
+            if include_resource_id:
+                row.append(verification.get("resource_id") or "")
+            row.append(_change_tags_text(verification))
+            row.append(_change_details_text(verification))
+            rows.append(row)
         table_text = "\n".join(_render_table(headers, rows))
         lines.append("<pre>")
         lines.append(_escape_html(table_text))
@@ -863,12 +911,12 @@ def _build_telegram_message(account, changes, verifications, now):
     return "\n".join(lines)
 
 
-def _build_slack_payload(account, changes, verifications, now):
+def _build_slack_payload(account, changes, verifications, now, include_resource_id):
     changes = changes or []
     verifications = verifications or []
     title = account.get("description") or account.get("account_id") or "account"
     time_text = now.strftime("%Y-%m-%d %H:%M %Z")
-    text_fallback = _build_text_message(account, changes, verifications, now)
+    text_fallback = _build_text_message(account, changes, verifications, now, include_resource_id)
 
     context_elements = [{"type": "mrkdwn", "text": f"*Time:* {time_text}"}]
     account_id = account.get("account_id")
@@ -894,26 +942,33 @@ def _build_slack_payload(account, changes, verifications, now):
         if len(changes) > 20:
             lines = []
             for change in changes:
-                extra = _format_change_extra(change)
-                resource_id = change.get("resource_id") or "-"
+                tags = _change_tags_text(change)
+                details = _change_details_text(change)
                 line = (
                     f"- {_format_action_label(change.get('action'))} "
-                    f"{_format_resource_label(change.get('resource_type'))} `{resource_id}`"
+                    f"{_format_resource_label(change.get('resource_type'))}"
                 )
-                if extra:
-                    line += f" - {extra}"
+                if include_resource_id:
+                    line += f" `{change.get('resource_id') or '-'}`"
+                if tags:
+                    line += f"\n  Tags: {tags}"
+                if details:
+                    line += f"\n  Details: {details}"
                 lines.append(line)
             if lines:
                 blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         else:
             for idx, change in enumerate(changes):
-                extra = _format_change_extra(change)
+                tags = _change_tags_text(change)
+                details = _change_details_text(change)
                 fields = [
                     {"type": "mrkdwn", "text": f"*Action*\n{_format_action_label(change.get('action'))}"},
                     {"type": "mrkdwn", "text": f"*Type*\n{_format_resource_label(change.get('resource_type'))}"},
-                    {"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"},
-                    {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
                 ]
+                if include_resource_id:
+                    fields.append({"type": "mrkdwn", "text": f"*Id*\n`{change.get('resource_id') or '-'}`"})
+                fields.append({"type": "mrkdwn", "text": f"*Tags*\n{tags if tags else '-'}"})
+                fields.append({"type": "mrkdwn", "text": f"*Details*\n{details if details else '-'}"})
                 blocks.append({"type": "section", "fields": fields})
                 if idx != len(changes) - 1:
                     blocks.append({"type": "divider"})
@@ -930,20 +985,25 @@ def _build_slack_payload(account, changes, verifications, now):
         if len(verifications) > 20:
             lines = []
             for verification in verifications:
-                extra = _format_change_extra(verification)
-                resource_id = verification.get("resource_id") or "-"
+                tags = _change_tags_text(verification)
+                details = _change_details_text(verification)
                 line = (
                     f"- {_format_status_label(verification.get('status'))} "
                     f"{_format_action_label(verification.get('action'))} "
-                    f"{_format_resource_label(verification.get('resource_type'))} `{resource_id}`"
+                    f"{_format_resource_label(verification.get('resource_type'))}"
                 )
-                if extra:
-                    line += f" - {extra}"
+                if include_resource_id:
+                    line += f" `{verification.get('resource_id') or '-'}`"
+                if tags:
+                    line += f"\n  Tags: {tags}"
+                if details:
+                    line += f"\n  Details: {details}"
                 lines.append(line)
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         else:
             for idx, verification in enumerate(verifications):
-                extra = _format_change_extra(verification)
+                tags = _change_tags_text(verification)
+                details = _change_details_text(verification)
                 fields = [
                     {
                         "type": "mrkdwn",
@@ -957,9 +1017,13 @@ def _build_slack_payload(account, changes, verifications, now):
                         "type": "mrkdwn",
                         "text": f"*Type*\n{_format_resource_label(verification.get('resource_type'))}",
                     },
-                    {"type": "mrkdwn", "text": f"*Id*\n`{verification.get('resource_id') or '-'}`"},
-                    {"type": "mrkdwn", "text": f"*Tags/Details*\n{extra if extra else '-'}"},
                 ]
+                if include_resource_id:
+                    fields.append(
+                        {"type": "mrkdwn", "text": f"*Id*\n`{verification.get('resource_id') or '-'}`"}
+                    )
+                fields.append({"type": "mrkdwn", "text": f"*Tags*\n{tags if tags else '-'}"})
+                fields.append({"type": "mrkdwn", "text": f"*Details*\n{details if details else '-'}"})
                 blocks.append({"type": "section", "fields": fields})
                 if idx != len(verifications) - 1:
                     blocks.append({"type": "divider"})
@@ -967,13 +1031,52 @@ def _build_slack_payload(account, changes, verifications, now):
     return {"text": text_fallback, "blocks": blocks}
 
 
-def _maybe_send_notifications(account, changes, verifications, now):
+def _build_webhook_payload(account, changes, verifications, now, text_message, include_resource_id):
+    account_payload = {}
+    for key in ("account_id", "region", "description"):
+        value = account.get(key)
+        if value is not None and str(value).strip():
+            account_payload[key] = value
+
+    change_payloads = [dict(change) for change in (changes or [])]
+    verification_payloads = [dict(verification) for verification in (verifications or [])]
+    if not include_resource_id:
+        for item in change_payloads:
+            item.pop("resource_id", None)
+        for item in verification_payloads:
+            item.pop("resource_id", None)
+
+    return {
+        "source": "terraform-aws-scheduler",
+        "time": now.isoformat(),
+        "account": account_payload,
+        "changes": change_payloads,
+        "verifications": verification_payloads,
+        "text": text_message,
+    }
+
+
+def _maybe_send_notifications(account, changes, verifications, now, include_resource_id):
     if not changes and not verifications:
         return
 
-    text_message = _build_text_message(account, changes, verifications, now)
-    slack_payload = _build_slack_payload(account, changes, verifications, now)
-    telegram_message = _build_telegram_message(account, changes, verifications, now)
+    text_message = _build_text_message(account, changes, verifications, now, include_resource_id)
+    slack_payload = _build_slack_payload(account, changes, verifications, now, include_resource_id)
+    telegram_message = _build_telegram_message(
+        account,
+        changes,
+        verifications,
+        now,
+        include_resource_id,
+    )
+    webhook_payload = _build_webhook_payload(
+        account,
+        changes,
+        verifications,
+        now,
+        text_message,
+        include_resource_id,
+    )
     account_id = account.get("account_id")
     region = account.get("region")
 
@@ -986,6 +1089,11 @@ def _maybe_send_notifications(account, changes, verifications, now):
         _send_slack(account.get("slack_webhook"), slack_payload)
     except Exception:
         logger.exception("Slack notification failed account=%s region=%s", account_id, region)
+
+    try:
+        _send_generic_webhook(account.get("generic_webhook"), webhook_payload)
+    except Exception:
+        logger.exception("Generic webhook notification failed account=%s region=%s", account_id, region)
 
     try:
         _send_telegram(
@@ -1319,7 +1427,9 @@ def handler(event, context):
         "schedule_value": settings["tag_schedule_value"],
         "window_key": settings["tag_window_key"],
     }
-    notify_tag_keys = settings["notification_tag_keys"]
+    notification_keys = settings["notification_tag_keys"]
+    notify_tag_keys = _notification_display_tag_keys(notification_keys)
+    include_resource_id = _notification_include_resource_id(notification_keys)
     asg_config = {
         "min_key": settings["tag_asg_min_key"],
         "max_key": settings["tag_asg_max_key"],
@@ -1444,7 +1554,7 @@ def handler(event, context):
         if verification_table and changes:
             _record_verifications(verification_table, account, changes, settings, now)
 
-        _maybe_send_notifications(account, changes, verifications, now)
+        _maybe_send_notifications(account, changes, verifications, now, include_resource_id)
         summary.append(
             {
                 "account": account.get("account_id"),

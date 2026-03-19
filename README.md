@@ -156,6 +156,7 @@ module "scheduler" {
       iam_role           = "testiam-schedule"
       teams_webhook      = "https://outlook.office.com/webhook/REPLACE_ME"
       slack_webhook      = "https://hooks.slack.com/services/REPLACE_ME"
+      generic_webhook    = "https://example.com/scheduler-webhook"
       telegram_bot_token = "123456:ABCDEF"
       telegram_chat_id   = "123456789"
       description        = "WEB-SERVER"
@@ -183,7 +184,7 @@ module "scheduler" {
   tag_asg_max_key    = "Schedule_Asg_Max"
   tag_asg_desired_key = "Schedule_Asg_Desired"
 
-  notification_tag_keys = ["Name"]
+  notification_tag_keys = ["Name", "Id"]
 
   enable_verification        = true
   verification_delay_minutes = 30
@@ -210,6 +211,7 @@ Each entry in `accounts` supports:
 - `iam_role` required, role name or full ARN
 - `teams_webhook` optional
 - `slack_webhook` optional
+- `generic_webhook` optional, sends scheduler JSON to any HTTP endpoint
 - `telegram_bot_token` optional
 - `telegram_chat_id` optional
 - `description` optional
@@ -306,8 +308,27 @@ Notifications:
 
 - Teams is skipped when `teams_webhook` is empty.
 - Slack is skipped when `slack_webhook` is empty.
+- Generic webhook is skipped when `generic_webhook` is empty.
 - Telegram sends only when both `telegram_bot_token` and `telegram_chat_id` are set.
+- `notification_tag_keys` supports the reserved key `Id`. If `Id` is missing, resource IDs are omitted from outgoing notifications.
 - Notifications are sent only when changes occur or verification results exist.
+
+Generic webhook payload:
+
+```json
+{
+  "source": "terraform-aws-scheduler",
+  "time": "2026-03-19T12:34:56+09:00",
+  "account": {
+    "account_id": "390844779767",
+    "region": "ap-northeast-2",
+    "description": "WEB-SERVER"
+  },
+  "changes": [],
+  "verifications": [],
+  "text": "[Scheduler] WEB-SERVER\n..."
+}
+```
 
 Verification:
 
@@ -341,7 +362,7 @@ eventbridge_log_retention_in_days = 30
 - `eventbridge_log_retention_in_days` default `30`
 - `tags` default `{}`
 - `log_level` default `INFO`
-- `notification_tag_keys` default `[]`
+- `notification_tag_keys` default `[]`; add `Id` to include resource IDs in notifications
 - `enable_verification` default `false`
 - `verification_delay_minutes` default `30`
 - `verification_table_name` default `""`, which becomes `<lambda_function_name>-verification`

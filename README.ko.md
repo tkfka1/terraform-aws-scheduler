@@ -156,6 +156,7 @@ module "scheduler" {
       iam_role           = "testiam-schedule"
       teams_webhook      = "https://outlook.office.com/webhook/REPLACE_ME"
       slack_webhook      = "https://hooks.slack.com/services/REPLACE_ME"
+      generic_webhook    = "https://example.com/scheduler-webhook"
       telegram_bot_token = "123456:ABCDEF"
       telegram_chat_id   = "123456789"
       description        = "WEB-SERVER"
@@ -205,14 +206,15 @@ module "scheduler" {
 
 `accounts` 배열의 각 항목은 아래 필드를 가집니다.
 
-- `account_id` 필수
-- `region` 필수
-- `iam_role` 필수, Role 이름 또는 전체 ARN
-- `teams_webhook` 선택
-- `slack_webhook` 선택
-- `telegram_bot_token` 선택
-- `telegram_chat_id` 선택
-- `description` 선택
+- `account_id` ??
+- `region` ??
+- `iam_role` ??, Role ?? ?? ?? ARN
+- `teams_webhook` ??
+- `slack_webhook` ??
+- `generic_webhook` ??, HTTP endpoint ? scheduler JSON ? ??
+- `telegram_bot_token` ??
+- `telegram_chat_id` ??
+- `description` ??
 
 ## 대상 계정 IAM Role
 
@@ -302,12 +304,13 @@ arn:aws:iam::<account_id>:role/<iam_role>
 
 ## 선택 기능
 
-알림:
+??:
 
-- Teams 는 `teams_webhook` 이 비어 있으면 전송하지 않습니다.
-- Slack 은 `slack_webhook` 이 비어 있으면 전송하지 않습니다.
-- Telegram 은 `telegram_bot_token` 과 `telegram_chat_id` 가 모두 있어야 전송합니다.
-- 알림은 실제 변경이 있거나 검증 결과가 있을 때만 보냅니다.
+- Teams ? `teams_webhook` ? ?? ??? ???? ????.
+- Slack ? `slack_webhook` ? ?? ??? ???? ????.
+- Generic webhook ? `generic_webhook` ? ?? ??? ???? ????.
+- Telegram ? `telegram_bot_token` ? `telegram_chat_id` ? ?? ??? ?????.
+- ??? ?? ??? ??? ?? ??? ?? ?? ????.
 
 검증:
 
